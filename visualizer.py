@@ -9,7 +9,9 @@
 import click
 import os
 
-import multiprocessing
+import torch.multiprocessing as multiprocessing
+if __name__ == "__main__":
+    multiprocessing.set_start_method('spawn')
 import numpy as np
 import imgui
 import dnnlib
@@ -216,10 +218,6 @@ class AsyncRenderer:
         if self._process is None:
             self._args_queue = multiprocessing.Queue()
             self._result_queue = multiprocessing.Queue()
-            try:
-                multiprocessing.set_start_method('spawn')
-            except RuntimeError:
-                pass
             self._process = multiprocessing.Process(target=self._process_fn, args=(self._args_queue, self._result_queue), daemon=True)
             self._process.start()
         self._args_queue.put([args, self._cur_stamp])

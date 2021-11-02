@@ -410,7 +410,7 @@ class SynthesisNetwork(torch.nn.Module):
         last_stopband_rel   = 2**0.3,   # Minimum stopband of the last layer, expressed relative to the cutoff.
         margin_size         = 10,       # Number of additional pixels outside the image.
         output_scale        = 0.25,     # Scale factor for the output image.
-        num_fp16_res        = 4,        # Use FP16 for the N highest resolutions.
+        num_fp16_res        = 5,        # Use FP16 for the N highest resolutions.
         **layer_kwargs,                 # Arguments for SynthesisLayer.
     ):
         super().__init__()
