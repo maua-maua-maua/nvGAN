@@ -10,6 +10,7 @@
 "Alias-Free Generative Adversarial Networks"."""
 
 import os
+import glob
 import click
 import re
 import json
@@ -121,6 +122,17 @@ def parse_comma_separated_list(s):
 
 #----------------------------------------------------------------------------
 
+# Finds the latest pkl file in the `outdir`, including its kimg number.
+# Reimplementation of https://github.com/skyflynil/stylegan2/commit/8c57ee4633d334e480a23d7f82433c7649d50866
+def locate_latest_pkl(outdir: str):
+    allpickles = sorted(glob.glob(os.path.join(outdir, '0*', 'network-*.pkl')))
+    latest_pkl = allpickles[-1]
+    RE_KIMG = re.compile('network-snapshot-(\d+).pkl')
+    latest_kimg = int(RE_KIMG.match(os.path.basename(latest_pkl)).group(1))
+    return latest_pkl, latest_kimg
+
+#----------------------------------------------------------------------------
+
 @click.command()
 
 # Required.
@@ -134,9 +146,12 @@ def parse_comma_separated_list(s):
 # Optional features.
 @click.option('--cond',         help='Train conditional model', metavar='BOOL',                 type=bool, default=False, show_default=True)
 @click.option('--mirror',       help='Enable dataset x-flips', metavar='BOOL',                  type=bool, default=False, show_default=True)
+@click.option('--mirrory',      help='Enable dataset y-flips', metavar='BOOL',                  type=bool, default=False, show_default=True)
 @click.option('--aug',          help='Augmentation mode',                                       type=click.Choice(['noaug', 'ada', 'fixed']), default='ada', show_default=True)
-@click.option('--resume',       help='Resume from given network pickle', metavar='[PATH|URL]',  type=str)
+@click.option('--augpipe',      help='Augmentation pipeline',                                   type=click.Choice(['bg', 'bgc']), default='bgc', show_default=True)
+@click.option('--resume',       help='Resume from given network pickle (PATH, URL or "latest")', metavar='[PATH|URL|"latest"]',  type=str)
 @click.option('--freezed',      help='Freeze first layers of D', metavar='INT',                 type=click.IntRange(min=0), default=0, show_default=True)
+@click.option('--initstrength', help='Override ADA strength at start',                          type=click.FloatRange(min=0))
 
 # Misc hyperparameters.
 @click.option('--p',            help='Probability for --aug=fixed', metavar='FLOAT',            type=click.FloatRange(min=0, max=1), default=0.2, show_default=True)
@@ -200,6 +215,7 @@ def main(**kwargs):
         raise click.ClickException('--cond=True requires labels specified in dataset.json')
     c.training_set_kwargs.use_labels = opts.cond
     c.training_set_kwargs.xflip = opts.mirror
+    c.training_set_kwargs.yflip = opts.mirrory
 
     # Hyperparameters & settings.
     c.num_gpus = opts.gpus
@@ -252,15 +268,27 @@ def main(**kwargs):
 
     # Augmentation.
     if opts.aug != 'noaug':
-        c.augment_kwargs = dnnlib.EasyDict(class_name='training.augment.AugmentPipe', xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1, lumaflip=1, hue=1, saturation=1)
+        if opts.augpipe == 'bg':
+            # xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1
+            c.augment_kwargs = dnnlib.EasyDict(class_name='training.augment.AugmentPipe', xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=0, contrast=0, lumaflip=0, hue=0, saturation=0)
+        else:
+            c.augment_kwargs = dnnlib.EasyDict(class_name='training.augment.AugmentPipe', xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1, lumaflip=1, hue=1, saturation=1)
         if opts.aug == 'ada':
             c.ada_target = opts.target
         if opts.aug == 'fixed':
             c.augment_p = opts.p
 
+    # Initial Augmentation Strength.
+    if opts.initstrength is not None:
+        assert isinstance(opts.initstrength, float)
+        c.augment_p = opts.initstrength
+
     # Resume.
     if opts.resume is not None:
-        c.resume_pkl = opts.resume
+        if opts.resume == "latest":
+            c.resume_pkl, c.resume_kimg = locate_latest_pkl(opts.outdir)
+        else:
+            c.resume_pkl = opts.resume
         c.ada_kimg = 100 # Make ADA react faster at the beginning.
         c.ema_rampup = None # Disable EMA rampup.
         c.loss_kwargs.blur_init_sigma = 0 # Disable blur rampup.

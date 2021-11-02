@@ -1,3 +1,14 @@
+## Modified StyleGAN3 Repo
+
+### Changes Made
+- tied to python 3.7 syntax
+- .jpgs instead of .pngs for training
+- sample seeds to recreate the 1024 training grid with default seed (see [1024grid-seed0.npz](https://github.com/dvschultz/stylegan3/blob/main/1024grid-seed0.npz))
+- easy restart settings (set initial augment strength using `--initstrength`)
+- option to mirror dataset vertically (`--mirrory`)
+- brought back option to disable color augmentations (`--augpipe=bg`)
+- resume from the latest pkl file in the outdir (`--resume=latest`)
+
 ## Alias-Free Generative Adversarial Networks (StyleGAN3)<br><sub>Official PyTorch implementation of the NeurIPS 2021 paper</sub>
 
 ![Teaser image](./docs/stylegan3-teaser-1920x1006.png)
