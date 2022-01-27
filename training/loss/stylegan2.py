@@ -10,17 +10,12 @@
 
 import numpy as np
 import torch
+
 from torch_utils import training_stats
-from torch_utils.ops import conv2d_gradfix
-from torch_utils.ops import upfirdn2d
+from torch_utils.ops import conv2d_gradfix, upfirdn2d
 
-#----------------------------------------------------------------------------
+from .base import Loss
 
-class Loss:
-    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, gain, cur_nimg): # to be overridden by subclass
-        raise NotImplementedError()
-
-#----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
     def __init__(self, device, G, D, augment_pipe=None, r1_gamma=10, style_mixing_prob=0, pl_weight=0, pl_batch_shrink=2, pl_decay=0.01, pl_no_weight_grad=False, blur_init_sigma=0, blur_fade_kimg=0):

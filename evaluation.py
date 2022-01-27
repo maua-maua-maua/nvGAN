@@ -3,13 +3,14 @@ import json
 import os
 import sys
 
-import dnnlib
-import legacy
 import numpy as np
 import scipy.linalg
 import torch
-from metrics import metric_utils
 from prdc import compute_prdc
+
+import dnnlib
+import legacy
+from metrics import metric_utils
 
 device = torch.device("cuda")
 torch.backends.cudnn.benchmark = True

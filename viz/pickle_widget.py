@@ -10,9 +10,10 @@ import glob
 import os
 import re
 
-import dnnlib
 import imgui
 import numpy as np
+
+import dnnlib
 from gui_utils import imgui_utils
 
 from . import renderer

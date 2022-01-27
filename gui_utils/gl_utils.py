@@ -6,20 +6,23 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-import os
-import functools
 import contextlib
+import functools
+import os
+
 import numpy as np
 import OpenGL.GL as gl
 import OpenGL.GL.ARB.texture_float
+
 import dnnlib
 
 #----------------------------------------------------------------------------
 
 def init_egl():
     assert os.environ['PYOPENGL_PLATFORM'] == 'egl' # Must be set before importing OpenGL.
-    import OpenGL.EGL as egl
     import ctypes
+
+    import OpenGL.EGL as egl
 
     # Initialize EGL.
     display = egl.eglGetDisplay(egl.EGL_DEFAULT_DISPLAY)

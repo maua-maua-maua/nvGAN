@@ -11,6 +11,7 @@ GANs". Matches the original implementation by Binkowski et al. at
 https://github.com/mbinkowski/MMD-GAN/blob/master/gan/compute_scores.py"""
 
 import numpy as np
+
 from . import metric_utils
 
 #----------------------------------------------------------------------------

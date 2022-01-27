@@ -8,12 +8,15 @@
 
 """Converting legacy network pickle into the new format."""
 
-import click
+import copy
+import io
 import pickle
 import re
-import copy
+
+import click
 import numpy as np
 import torch
+
 import dnnlib
 from torch_utils import misc
 
@@ -66,6 +69,8 @@ class _LegacyUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
         if module == 'dnnlib.tflib.network' and name == 'Network':
             return _TFNetworkStub
+        if module == 'torch.storage' and name == '_load_from_bytes':
+            return lambda b: torch.load(io.BytesIO(b), map_location='cpu')
         return super().find_class(module, name)
 
 #----------------------------------------------------------------------------
@@ -117,8 +122,8 @@ def convert_tf_generator(tf_G):
         return val if val is not None else none
 
     # Convert kwargs.
-    from training import networks_stylegan2
-    network_class = networks_stylegan2.Generator
+    from networks import stylegan2
+    network_class = stylegan2.Generator
     kwargs = dnnlib.EasyDict(
         z_dim               = kwarg('latent_size',          512),
         c_dim               = kwarg('label_size',           0),
@@ -264,8 +269,8 @@ def convert_tf_discriminator(tf_D):
     #for name, value in tf_params.items(): print(f'{name:<50s}{list(value.shape)}')
 
     # Convert params.
-    from training import networks_stylegan2
-    D = networks_stylegan2.Discriminator(**kwargs).eval().requires_grad_(False)
+    from networks import stylegan2
+    D = stylegan2.Discriminator(**kwargs).eval().requires_grad_(False)
     # pylint: disable=unnecessary-lambda
     # pylint: disable=f-string-without-interpolation
     _populate_module_params(D,

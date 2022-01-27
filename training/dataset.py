@@ -8,12 +8,15 @@
 
 """Streaming images and labels from datasets created with dataset_tool.py."""
 
-import os
-import numpy as np
-import zipfile
-import PIL.Image
+import copy
 import json
+import os
+import zipfile
+
+import numpy as np
+import PIL.Image
 import torch
+
 import dnnlib
 
 try:
@@ -31,7 +34,7 @@ class Dataset(torch.utils.data.Dataset):
         use_labels  = False,    # Enable conditioning labels? False = label dimension is zero.
         xflip       = False,    # Artificially double the size of the dataset via x-flips. Applied after max_size.
         yflip       = False,    # Artificially double the size of the dataset via y-flips. Applied after max_size.
-        random_seed = 0,        # Random seed to use when applying max_size.
+        random_seed = 40,       # Random seed to use when applying max_size.
     ):
         self._name = name
         self._raw_shape = list(raw_shape)
@@ -41,6 +44,7 @@ class Dataset(torch.utils.data.Dataset):
 
         # Apply max_size.
         self._raw_idx = np.arange(self._raw_shape[0], dtype=np.int64)
+        self._base_raw_idx = copy.deepcopy(self._raw_idx)
         if (max_size is not None) and (self._raw_idx.size > max_size):
             np.random.RandomState(random_seed).shuffle(self._raw_idx)
             self._raw_idx = np.sort(self._raw_idx[:max_size])
@@ -57,6 +61,18 @@ class Dataset(torch.utils.data.Dataset):
             self._raw_idx = np.tile(self._raw_idx, 2)
             self._yflip = np.concatenate([self._yflip, np.ones_like(self._yflip)])
             self._xflip = np.tile(self._xflip, 2)  # double the indices for xflip, otherwise we get out of bounds
+            
+    def set_dyn_len(self, new_len):
+        self._raw_idx = self._base_raw_idx[:new_len]
+
+    def set_classes(self, cls_list):
+        self._raw_labels = self._load_raw_labels()
+        new_idcs = [self._raw_labels == cl for cl in cls_list]
+        new_idcs = np.sum(np.vstack(new_idcs), 0)  # logical or
+        new_idcs = np.where(new_idcs)  # find location
+        self._raw_idx = self._base_raw_idx[new_idcs]
+        assert all(sorted(cls_list) == np.unique(self._raw_labels[self._raw_idx]))
+        print(f"Training on the following classes: {cls_list}")
 
     def _get_raw_labels(self):
         if self._raw_labels is None:

@@ -1,26 +1,19 @@
-# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 """Main API for computing and reporting quality metrics."""
 
+import json
 import os
 import time
-import json
+
 import torch
+
 import dnnlib
 
-from . import metric_utils
-from . import frechet_inception_distance
-from . import kernel_inception_distance
-from . import precision_recall
-from . import perceptual_path_length
-from . import inception_score
-from . import equivariance
+from . import (equivariance, frechet_inception_distance, inception_score,
+               kernel_inception_distance, metric_utils, perceptual_path_length,
+               precision_recall)
 
 #----------------------------------------------------------------------------
 
@@ -89,6 +82,12 @@ def fid50k_full(opts):
     return dict(fid50k_full=fid)
 
 @register_metric
+def fid10k_full(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fid = frechet_inception_distance.compute_fid(opts, max_real=None, num_gen=10000)
+    return dict(fid10k_full=fid)
+
+@register_metric
 def kid50k_full(opts):
     opts.dataset_kwargs.update(max_size=None, xflip=False)
     kid = kernel_inception_distance.compute_kid(opts, max_real=1000000, num_gen=50000, num_subsets=100, max_subset_size=1000)
@@ -123,7 +122,6 @@ def eqr50k(opts):
     psnr = equivariance.compute_equivariance_metrics(opts, num_samples=50000, batch_size=4, compute_eqr=True)
     return dict(eqr50k=psnr)
 
-#----------------------------------------------------------------------------
 # Legacy metrics.
 
 @register_metric
@@ -149,5 +147,3 @@ def is50k(opts):
     opts.dataset_kwargs.update(max_size=None, xflip=False)
     mean, std = inception_score.compute_is(opts, num_gen=50000, num_splits=10)
     return dict(is50k_mean=mean, is50k_std=std)
-
-#----------------------------------------------------------------------------

@@ -1,84 +1,31 @@
-## Modified StyleGAN3 Repo
+# Maua GANs (NVIDIA implementation)
 
-### Changes Made
-- tied to python 3.7 syntax
-- .jpgs instead of .pngs for training
-- sample seeds to recreate the 1024 training grid with default seed (see [1024grid-seed0.npz](https://github.com/dvschultz/stylegan3/blob/main/1024grid-seed0.npz))
-- easy restart settings (set initial augment strength using `--initstrength`)
-- option to mirror dataset vertically (`--mirrory`)
-- brought back option to disable color augmentations (`--augpipe=bg`)
-- resume from the latest pkl file in the outdir (`--resume=latest`)
+Multiple different repositories based on StyleGAN2-ADA-PyTorch merged together for convenience.
 
-## Alias-Free Generative Adversarial Networks (StyleGAN3)<br><sub>Official PyTorch implementation of the NeurIPS 2021 paper</sub>
-
-![Teaser image](./docs/stylegan3-teaser-1920x1006.png)
-
-**Alias-Free Generative Adversarial Networks**<br>
+**Alias-Free Generative Adversarial Networks (StyleGAN3)**<br>
 Tero Karras, Miika Aittala, Samuli Laine, Erik H&auml;rk&ouml;nen, Janne Hellsten, Jaakko Lehtinen, Timo Aila<br>
 https://nvlabs.github.io/stylegan3<br>
 
 Abstract: *We observe that despite their hierarchical convolutional nature, the synthesis process of typical generative adversarial networks depends on absolute pixel coordinates in an unhealthy manner. This manifests itself as, e.g., detail appearing to be glued to image coordinates instead of the surfaces of depicted objects. We trace the root cause to careless signal processing that causes aliasing in the generator network. Interpreting all signals in the network as continuous, we derive generally applicable, small architectural changes that guarantee that unwanted information cannot leak into the hierarchical synthesis process. The resulting networks match the FID of StyleGAN2 but differ dramatically in their internal representations, and they are fully equivariant to translation and rotation even at subpixel scales. Our results pave the way for generative models better suited for video and animation.*
 
-For business inquiries, please visit our website and submit the form: [NVIDIA Research Licensing](https://www.nvidia.com/en-us/research/inquiries/)
+**Projected GANs Converge Faster**<br>
+[Axel Sauer](https://axelsauer.com/), [Kashyap Chitta](https://kashyap7x.github.io/), [Jens Müller](https://hci.iwr.uni-heidelberg.de/users/jmueller), and [Andreas Geiger](http://www.cvlibs.net/)<br>
+https://sites.google.com/view/projected-gan/<br>
 
-## Release notes
-
-This repository is an updated version of [stylegan2-ada-pytorch](https://github.com/NVlabs/stylegan2-ada-pytorch), with several new features:
-- Alias-free generator architecture and training configurations (`stylegan3-t`, `stylegan3-r`).
-- Tools for interactive visualization (`visualizer.py`), spectral analysis (`avg_spectra.py`), and video generation (`gen_video.py`).
-- Equivariance metrics (`eqt50k_int`, `eqt50k_frac`, `eqr50k`).
-- General improvements: reduced memory usage, slightly faster training, bug fixes.
-
-Compatibility:
-- Compatible with old network pickles created using [stylegan2-ada](https://github.com/NVlabs/stylegan2-ada) and [stylegan2-ada-pytorch](https://github.com/NVlabs/stylegan2-ada-pytorch).  (Note: running old StyleGAN2 models on StyleGAN3 code will produce the same results as running them on stylegan2-ada/stylegan2-ada-pytorch.  To benefit from the StyleGAN3 architecture, you need to retrain.)
-- Supports old StyleGAN2 training configurations, including ADA and transfer learning. See [Training configurations](./docs/configs.md) for details.
-- Improved compatibility with Ampere GPUs and newer versions of PyTorch, CuDNN, etc.
-
-## Synthetic image detection
-
-While new generator approaches enable new media synthesis capabilities, they may also present a new challenge for AI forensics algorithms for detection and attribution of synthetic media. In collaboration with digital forensic researchers participating in DARPA's SemaFor program, we curated a synthetic image dataset that allowed the researchers to test and validate the performance of their image detectors in advance of the public release. Please see [here](https://github.com/NVlabs/stylegan3-detector) for more details.
-
-## Additional material
-
-- [Result videos](https://nvlabs-fi-cdn.nvidia.com/stylegan3/videos/)
-- [Curated example images](https://nvlabs-fi-cdn.nvidia.com/stylegan3/images/)
-- [StyleGAN3 pre-trained models](https://ngc.nvidia.com/catalog/models/nvidia:research:stylegan3) for config T (translation equiv.) and config R (translation and rotation equiv.)
-  > <sub>Access individual networks via `https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/<MODEL>`, where `<MODEL>` is one of:</sub><br>
-  > <sub>`stylegan3-t-ffhq-1024x1024.pkl`, `stylegan3-t-ffhqu-1024x1024.pkl`, `stylegan3-t-ffhqu-256x256.pkl`</sub><br>
-  > <sub>`stylegan3-r-ffhq-1024x1024.pkl`, `stylegan3-r-ffhqu-1024x1024.pkl`, `stylegan3-r-ffhqu-256x256.pkl`</sub><br>
-  > <sub>`stylegan3-t-metfaces-1024x1024.pkl`, `stylegan3-t-metfacesu-1024x1024.pkl`</sub><br>
-  > <sub>`stylegan3-r-metfaces-1024x1024.pkl`, `stylegan3-r-metfacesu-1024x1024.pkl`</sub><br>
-  > <sub>`stylegan3-t-afhqv2-512x512.pkl`</sub><br>
-  > <sub>`stylegan3-r-afhqv2-512x512.pkl`</sub><br>
-- [StyleGAN2 pre-trained models](https://ngc.nvidia.com/catalog/models/nvidia:research:stylegan2) compatible with this codebase
-  > <sub>Access individual networks via `https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/<MODEL>`, where `<MODEL>` is one of:</sub><br>
-  > <sub>`stylegan2-ffhq-1024x1024.pkl`, `stylegan2-ffhq-512x512.pkl`, `stylegan2-ffhq-256x256.pkl`</sub><br>
-  > <sub>`stylegan2-ffhqu-1024x1024.pkl`, `stylegan2-ffhqu-256x256.pkl`</sub><br>
-  > <sub>`stylegan2-metfaces-1024x1024.pkl`, `stylegan2-metfacesu-1024x1024.pkl`</sub><br>
-  > <sub>`stylegan2-afhqv2-512x512.pkl`</sub><br>
-  > <sub>`stylegan2-afhqcat-512x512.pkl`, `stylegan2-afhqdog-512x512.pkl`, `stylegan2-afhqwild-512x512.pkl`</sub><br>
-  > <sub>`stylegan2-brecahad-512x512.pkl`, `stylegan2-cifar10-32x32.pkl`</sub><br>
-  > <sub>`stylegan2-celebahq-256x256.pkl`, `stylegan2-lsundog-256x256.pkl`</sub><br>
-
-## Requirements
-
-* Linux and Windows are supported, but we recommend Linux for performance and compatibility reasons.
-* 1&ndash;8 high-end NVIDIA GPUs with at least 12 GB of memory. We have done all testing and development using Tesla V100 and A100 GPUs.
-* 64-bit Python 3.8 and PyTorch 1.9.0 (or later). See https://pytorch.org for PyTorch install instructions.
-* CUDA toolkit 11.1 or later.  (Why is a separate CUDA toolkit installation required?  See [Troubleshooting](./docs/troubleshooting.md#why-is-cuda-toolkit-installation-necessary)).
-* GCC 7 or later (Linux) or Visual Studio (Windows) compilers.  Recommended GCC version depends on CUDA version, see for example [CUDA 11.4 system requirements](https://docs.nvidia.com/cuda/archive/11.4.1/cuda-installation-guide-linux/index.html#system-requirements).
-* Python libraries: see [environment.yml](./environment.yml) for exact library dependencies.  You can use the following commands with Miniconda3 to create and activate your StyleGAN3 Python environment:
-  - `conda env create -f environment.yml`
-  - `conda activate stylegan3`
-* Docker users:
-  - Ensure you have correctly installed the [NVIDIA container runtime](https://docs.docker.com/config/containers/resource_constraints/#gpu).
-  - Use the [provided Dockerfile](./Dockerfile) to build an image with the required library dependencies.
-
-The code relies heavily on custom PyTorch extensions that are compiled on the fly using NVCC. On Windows, the compilation requires Microsoft Visual Studio. We recommend installing [Visual Studio Community Edition](https://visualstudio.microsoft.com/vs/) and adding it into `PATH` using `"C:\Program Files (x86)\Microsoft Visual Studio\<VERSION>\Community\VC\Auxiliary\Build\vcvars64.bat"`.
-
-See [Troubleshooting](./docs/troubleshooting.md) for help on common installation and run-time problems.
+Abstract: *Generative Adversarial Networks (GANs) produce high-quality images but are challenging to train. They need careful regularization, vast amounts of compute, and expensive hyper-parameter sweeps. We make significant headway on these issues by projecting generated and real samples into a fixed, pretrained feature space. Motivated by the finding that the discriminator cannot fully exploit features from deeper layers of the pretrained model, we propose a more effective strategy that mixes features across channels and resolutions. Our Projected GAN improves image quality, sample efficiency, and convergence speed. It is further compatible with resolutions of up to one Megapixel and advances the state-of-the-art Fréchet Inception Distance (FID) on twenty-two benchmark datasets. Importantly, Projected GANs match the previously lowest FIDs up to 40 times faster, cutting the wall-clock time from 5 days to less than 3 hours given the same computational resources.*
 
 ## Getting started
+
+To generate samples and interpolation videos, run
+```
+python gen_images.py --outdir=out --trunc=1.0 --seeds=10-15 \
+  --network=PATH_TO_NETWORK_PKL
+```
+and
+```
+python gen_video.py --output=lerp.mp4 --trunc=1.0 --seeds=0-31 --grid=4x2 \
+  --network=PATH_TO_NETWORK_PKL
+```
 
 Pre-trained networks are stored as `*.pkl` files that can be referenced using local filenames or URLs:
 
@@ -93,38 +40,6 @@ python gen_video.py --output=lerp.mp4 --trunc=1 --seeds=0-31 --grid=4x2 \
 ```
 
 Outputs from the above commands are placed under `out/*.png`, controlled by `--outdir`. Downloaded network pickles are cached under `$HOME/.cache/dnnlib`, which can be overridden by setting the `DNNLIB_CACHE_DIR` environment variable. The default PyTorch extension build directory is `$HOME/.cache/torch_extensions`, which can be overridden by setting `TORCH_EXTENSIONS_DIR`.
-
-**Docker**: You can run the above curated image example using Docker as follows:
-
-```.bash
-# Build the stylegan3:latest image
-docker build --tag stylegan3 .
-
-# Run the gen_images.py script using Docker:
-docker run --gpus all -it --rm --user $(id -u):$(id -g) \
-    -v `pwd`:/scratch --workdir /scratch -e HOME=/scratch \
-    stylegan3 \
-    python gen_images.py --outdir=out --trunc=1 --seeds=2 \
-         --network=https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-r-afhqv2-512x512.pkl
-```
-
-Note: The Docker image requires NVIDIA driver release `r470` or later.
-
-The `docker run` invocation may look daunting, so let's unpack its contents here:
-
-- `--gpus all -it --rm --user $(id -u):$(id -g)`: with all GPUs enabled, run an interactive session with current user's UID/GID to avoid Docker writing files as root.
-- ``-v `pwd`:/scratch --workdir /scratch``: mount current running dir (e.g., the top of this git repo on your host machine) to `/scratch` in the container and use that as the current working dir.
-- `-e HOME=/scratch`: let PyTorch and StyleGAN3 code know where to cache temporary files such as pre-trained models and custom PyTorch extension build results. Note: if you want more fine-grained control, you can instead set `TORCH_EXTENSIONS_DIR` (for custom extensions build dir) and `DNNLIB_CACHE_DIR` (for pre-trained model download cache). You want these cache dirs to reside on persistent volumes so that their contents are retained across multiple `docker run` invocations.
-
-## Interactive visualization
-
-This release contains an interactive model visualization tool that can be used to explore various characteristics of a trained model.  To start it, run:
-
-```.bash
-python visualizer.py
-```
-
-<a href="./docs/visualizer_screen0.png"><img alt="Visualizer screenshot" src="./docs/visualizer_screen0_half.png"></img></a>
 
 ## Using networks from Python
 
@@ -151,44 +66,21 @@ img = G.synthesis(w, noise_mode='const', force_fp32=True)
 
 Please refer to [`gen_images.py`](./gen_images.py) for complete code example.
 
+Our implementation is modular, so it is straightforward to use PG in your own codebase. Simply copy the ```training/networks``` folder to your project.
+Then, to get the projected multi-scale discriminator, run
+```
+from training.networks.projected_discriminator import ProjectedDiscriminator
+D = ProjectedDiscriminator()
+```
+The only thing you still need to do is to make sure that the feature network is not trained, i.e., explicitly set
+```
+D.feature_network.requires_grad_(False)
+```
+in your training loop.
+
 ## Preparing datasets
 
 Datasets are stored as uncompressed ZIP archives containing uncompressed PNG files and a metadata file `dataset.json` for labels. Custom datasets can be created from a folder containing images; see [`python dataset_tool.py --help`](./docs/dataset-tool-help.txt) for more information. Alternatively, the folder can also be used directly as a dataset, without running it through `dataset_tool.py` first, but doing so may lead to suboptimal performance.
-
-**FFHQ**: Download the [Flickr-Faces-HQ dataset](https://github.com/NVlabs/ffhq-dataset) as 1024x1024 images and create a zip archive using `dataset_tool.py`:
-
-```.bash
-# Original 1024x1024 resolution.
-python dataset_tool.py --source=/tmp/images1024x1024 --dest=~/datasets/ffhq-1024x1024.zip
-
-# Scaled down 256x256 resolution.
-python dataset_tool.py --source=/tmp/images1024x1024 --dest=~/datasets/ffhq-256x256.zip \
-    --resolution=256x256
-```
-
-See the [FFHQ README](https://github.com/NVlabs/ffhq-dataset) for information on how to obtain the unaligned FFHQ dataset images. Use the same steps as above to create a ZIP archive for training and validation.
-
-**MetFaces**: Download the [MetFaces dataset](https://github.com/NVlabs/metfaces-dataset) and create a ZIP archive:
-
-```.bash
-python dataset_tool.py --source=~/downloads/metfaces/images --dest=~/datasets/metfaces-1024x1024.zip
-```
-
-See the [MetFaces README](https://github.com/NVlabs/metfaces-dataset) for information on how to obtain the unaligned MetFaces dataset images. Use the same steps as above to create a ZIP archive for training and validation.
-
-**AFHQv2**: Download the [AFHQv2 dataset](https://github.com/clovaai/stargan-v2/blob/master/README.md#animal-faces-hq-dataset-afhq) and create a ZIP archive:
-
-```.bash
-python dataset_tool.py --source=~/downloads/afhqv2 --dest=~/datasets/afhqv2-512x512.zip
-```
-
-Note that the above command creates a single combined dataset using all images of all three classes (cats, dogs, and wild animals), matching the setup used in the StyleGAN3 paper. Alternatively, you can also create a separate dataset for each class:
-
-```.bash
-python dataset_tool.py --source=~/downloads/afhqv2/train/cat --dest=~/datasets/afhqv2cat-512x512.zip
-python dataset_tool.py --source=~/downloads/afhqv2/train/dog --dest=~/datasets/afhqv2dog-512x512.zip
-python dataset_tool.py --source=~/downloads/afhqv2/train/wild --dest=~/datasets/afhqv2wild-512x512.zip
-```
 
 ## Training
 
@@ -208,6 +100,18 @@ python train.py --outdir=~/training-runs --cfg=stylegan3-r --data=~/datasets/met
 python train.py --outdir=~/training-runs --cfg=stylegan2 --data=~/datasets/ffhq-1024x1024.zip \
     --gpus=8 --batch=32 --gamma=10 --mirror=1 --aug=noaug
 ```
+
+Training your own PG on LSUN church using 8 GPUs:
+```
+python train.py --outdir=./training-runs/ --cfg=fastgan --data=./data/pokemon256.zip \
+  --gpus=8 --batch=64 --mirror=1 --snap=50 --batch-gpu=8 --kimg=10000
+```
+```--batch``` specifies the overall batch size, ```--batch-gpu``` specifies the batch size per GPU.  If you use fewer GPUs, the training loop will automatically accumulate gradients, until the overall batch size is reached.
+
+If you want to use the StyleGAN2 generator, pass ```--cfg=stylegan2```.
+We also added a lightweight version of FastGAN (```--cfg=fastgan_lite```). This backbone trains fast regarding wallclock
+time and yields better results on small datasets like Pokemon.
+Samples and metrics are saved in ```outdir```. To monitor the training progress, you can inspect fid50k_full.json or run tensorboard in training-runs.
 
 Note that the result quality and training time depend heavily on the exact set of options. The most important ones (`--gpus`, `--batch`, and `--gamma`) must be specified explicitly, and they should be selected with care. See [`python train.py --help`](./docs/train-help.txt) for the full list of options and [Training configurations](./docs/configs.md) for general guidelines &amp; recommendations, along with the expected training speed &amp; memory usage in different scenarios.
 
@@ -279,17 +183,9 @@ python avg_spectra.py heatmap tmp/stylegan3-r.npz
 python avg_spectra.py slices tmp/training-data.npz tmp/stylegan3-r.npz
 ```
 
-<a href="./docs/avg_spectra_screen0.png"><img alt="Average spectra screenshot" src="./docs/avg_spectra_screen0_half.png"></img></a>
-
-## License
-
-Copyright &copy; 2021, NVIDIA Corporation & affiliates. All rights reserved.
-
-This work is made available under the [Nvidia Source Code License](https://github.com/NVlabs/stylegan3/blob/main/LICENSE.txt).
-
 ## Citation
 
-```
+```bibtex
 @inproceedings{Karras2021,
   author = {Tero Karras and Miika Aittala and Samuli Laine and Erik H\"ark\"onen and Janne Hellsten and Jaakko Lehtinen and Timo Aila},
   title = {Alias-Free Generative Adversarial Networks},
@@ -298,10 +194,19 @@ This work is made available under the [Nvidia Source Code License](https://githu
 }
 ```
 
-## Development
-
-This is a research reference implementation and is treated as a one-time code drop. As such, we do not accept outside code contributions in the form of pull requests.
+```bibtex
+@InProceedings{Sauer2021NEURIPS,
+  author         = {Axel Sauer and Kashyap Chitta and Jens M{\"{u}}ller and Andreas Geiger},
+  title          = {Projected GANs Converge Faster},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year           = {2021},
+}
+```
 
 ## Acknowledgements
 
 We thank David Luebke, Ming-Yu Liu, Koki Nagano, Tuomas Kynk&auml;&auml;nniemi, and Timo Viitanen for reviewing early drafts and helpful suggestions. Fr&eacute;do Durand for early discussions. Tero Kuosmanen for maintaining our compute infrastructure. AFHQ authors for an updated version of their dataset. Getty Images for the training images in the Beaches dataset. We did not receive external funding or additional revenues for this project.
+
+Our codebase build and extends the awesome [StyleGAN2-ADA repo](https://github.com/NVlabs/stylegan2-ada-pytorch) and [StyleGAN3 repo](https://github.com/NVlabs/stylegan3), both by Karras et al.
+
+Furthermore, we use parts of the code of [FastGAN](https://github.com/odegeasslbc/FastGAN-pytorch) and [MiDas](https://github.com/isl-org/MiDaS).

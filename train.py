@@ -5,25 +5,26 @@
 # and any modifications thereto.  Any use, reproduction, disclosure or
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
-
-"""Train a GAN using the techniques described in the paper
-"Alias-Free Generative Adversarial Networks"."""
-
-import os
+#
+# modified by Axel Sauer for "Projected GANs Converge Faster"
+#
 import glob
-import click
-import re
 import json
+import os
+import re
 import tempfile
+
+import click
 import torch
 
 import dnnlib
-from training import training_loop
+import legacy
 from metrics import metric_main
-from torch_utils import training_stats
-from torch_utils import custom_ops
+from torch_utils import custom_ops, misc, training_stats
+from training import training_loop
 
 #----------------------------------------------------------------------------
+
 
 def subprocess_fn(rank, c, temp_dir):
     dnnlib.util.Logger(file_name=os.path.join(c.run_dir, 'log.txt'), file_mode='a', should_flush=True)
@@ -47,7 +48,6 @@ def subprocess_fn(rank, c, temp_dir):
     # Execute training loop.
     training_loop.training_loop(rank=rank, **c)
 
-#----------------------------------------------------------------------------
 
 def launch_training(c, desc, outdir, dry_run):
     dnnlib.util.Logger(should_flush=True)
@@ -56,11 +56,17 @@ def launch_training(c, desc, outdir, dry_run):
     prev_run_dirs = []
     if os.path.isdir(outdir):
         prev_run_dirs = [x for x in os.listdir(outdir) if os.path.isdir(os.path.join(outdir, x))]
-    prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
-    prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
-    cur_run_id = max(prev_run_ids, default=-1) + 1
-    c.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{desc}')
-    assert not os.path.exists(c.run_dir)
+
+    matching_dirs = [re.fullmatch(r'\d{5}' + f'-{desc}', x) for x in prev_run_dirs if re.fullmatch(r'\d{5}' + f'-{desc}', x) is not None]
+    if c.restart_every > 0 and len(matching_dirs) > 0:  # expect unique desc, continue in this directory
+        assert len(matching_dirs) == 1, f'Multiple directories found for resuming: {matching_dirs}'
+        c.run_dir = os.path.join(outdir, matching_dirs[0].group())
+    else:                     # fallback to standard
+        prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
+        prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
+        cur_run_id = max(prev_run_ids, default=-1) + 1
+        c.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{desc}')
+        assert not os.path.exists(c.run_dir)
 
     # Print options.
     print()
@@ -85,8 +91,8 @@ def launch_training(c, desc, outdir, dry_run):
 
     # Create output directory.
     print('Creating output directory...')
-    os.makedirs(c.run_dir)
-    with open(os.path.join(c.run_dir, 'training_options.json'), 'wt') as f:
+    os.makedirs(c.run_dir, exist_ok=c.restart_every > 0)
+    with open(os.path.join(c.run_dir, 'training_options.json'), 'wt+') as f:
         json.dump(c, f, indent=2)
 
     # Launch processes.
@@ -98,7 +104,6 @@ def launch_training(c, desc, outdir, dry_run):
         else:
             torch.multiprocessing.spawn(fn=subprocess_fn, args=(c, temp_dir), nprocs=c.num_gpus)
 
-#----------------------------------------------------------------------------
 
 def init_dataset_kwargs(data):
     try:
@@ -111,7 +116,6 @@ def init_dataset_kwargs(data):
     except IOError as err:
         raise click.ClickException(f'--data: {err}')
 
-#----------------------------------------------------------------------------
 
 def parse_comma_separated_list(s):
     if isinstance(s, list):
@@ -137,7 +141,7 @@ def locate_latest_pkl(outdir: str):
 
 # Required.
 @click.option('--outdir',       help='Where to save the results', metavar='DIR',                required=True)
-@click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2']), required=True)
+@click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['stylegan3-t', 'stylegan3-r', 'stylegan2', 'fastgan', 'fastgan_lite', 'stylegan2-pg']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
 @click.option('--batch',        help='Total batch size', metavar='INT',                         type=click.IntRange(min=1), required=True)
@@ -156,6 +160,9 @@ def locate_latest_pkl(outdir: str):
 # Misc hyperparameters.
 @click.option('--p',            help='Probability for --aug=fixed', metavar='FLOAT',            type=click.FloatRange(min=0, max=1), default=0.2, show_default=True)
 @click.option('--target',       help='Target value for --aug=ada', metavar='FLOAT',             type=click.FloatRange(min=0, max=1), default=0.6, show_default=True)
+@click.option('--resume',       help='Resume from given network pickle', metavar='[PATH|URL]',  type=str)
+
+# Misc hyperparameters.
 @click.option('--batch-gpu',    help='Limit batch size per GPU', metavar='INT',                 type=click.IntRange(min=1))
 @click.option('--cbase',        help='Capacity multiplier', metavar='INT',                      type=click.IntRange(min=1), default=32768, show_default=True)
 @click.option('--cmax',         help='Max. feature maps', metavar='INT',                        type=click.IntRange(min=1), default=512, show_default=True)
@@ -175,6 +182,7 @@ def locate_latest_pkl(outdir: str):
 @click.option('--nobench',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
 @click.option('--workers',      help='DataLoader worker processes', metavar='INT',              type=click.IntRange(min=1), default=3, show_default=True)
 @click.option('-n','--dry-run', help='Print training options and exit',                         is_flag=True)
+@click.option('--restart_every',help='Time interval in seconds to restart code', metavar='INT', type=int, default=9999999, show_default=True)
 
 def main(**kwargs):
     """Train a GAN using the techniques described in the paper
@@ -202,11 +210,32 @@ def main(**kwargs):
     # Initialize config.
     opts = dnnlib.EasyDict(kwargs) # Command line arguments.
     c = dnnlib.EasyDict() # Main config dict.
-    c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
-    c.D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
+
+    if opts.cfg in ['fastgan', 'fastgan_lite', 'stylegan2-pg']:
+        c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=64, w_dim=128, mapping_kwargs=dnnlib.EasyDict())
+        c.D_kwargs = dnnlib.EasyDict(
+            class_name='training.networks.projected_discriminator.ProjectedDiscriminator',
+            diffaug=True,
+            interp224=(c.training_set_kwargs.resolution < 224),
+            backbone_kwargs=dnnlib.EasyDict(),
+        )
+        c.D_kwargs.backbone_kwargs.cout = 64
+        c.D_kwargs.backbone_kwargs.expand = True
+        c.D_kwargs.backbone_kwargs.proj_type = 2
+        c.D_kwargs.backbone_kwargs.num_discs = 4
+        c.D_kwargs.backbone_kwargs.cond = opts.cond
+        c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.ProjectedGANLoss')
+    else:
+        c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
+        c.D_kwargs = dnnlib.EasyDict(class_name='training.networks.stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
+        c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
+
+    c.G_kwargs.channel_base = c.D_kwargs.channel_base = opts.cbase
+    c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
+
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
-    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
+
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
 
     # Training set.
@@ -221,14 +250,12 @@ def main(**kwargs):
     c.num_gpus = opts.gpus
     c.batch_size = opts.batch
     c.batch_gpu = opts.batch_gpu or opts.batch // opts.gpus
-    c.G_kwargs.channel_base = c.D_kwargs.channel_base = opts.cbase
-    c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
+
     c.G_kwargs.mapping_kwargs.num_layers = (8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
     c.loss_kwargs.r1_gamma = opts.gamma
-    c.G_opt_kwargs.lr = (0.002 if opts.cfg == 'stylegan2' else 0.0025) if opts.glr is None else opts.glr
-    c.D_opt_kwargs.lr = opts.dlr
+    
     c.metrics = opts.metrics
     c.total_kimg = opts.kimg
     c.kimg_per_tick = opts.tick
@@ -249,14 +276,26 @@ def main(**kwargs):
     # Base configuration.
     c.ema_kimg = c.batch_size * 10 / 32
     if opts.cfg == 'stylegan2':
-        c.G_kwargs.class_name = 'training.networks_stylegan2.Generator'
+        c.G_kwargs.class_name = 'training.networks.stylegan2.Generator'
         c.loss_kwargs.style_mixing_prob = 0.9 # Enable style mixing regularization.
         c.loss_kwargs.pl_weight = 2 # Enable path length regularization.
         c.G_reg_interval = 4 # Enable lazy regularization for G.
         c.G_kwargs.fused_modconv_default = 'inference_only' # Speed up training by using regular convolutions instead of grouped convolutions.
         c.loss_kwargs.pl_no_weight_grad = True # Speed up path length regularization by skipping gradient computation wrt. conv2d weights.
+        c.G_opt_kwargs.lr = 0.0002
+    elif opts.cfg == 'stylegan2-pg':
+        c.G_kwargs.class_name = 'training.networks.stylegan2.Generator'
+        c.G_kwargs.fused_modconv_default = 'inference_only' # Speed up training by using regular convolutions instead of grouped convolutions.
+        c.D_kwargs.backbone_kwargs.separable = False
+        c.G_opt_kwargs.lr = 0.00025
+    elif opts.cfg in ['fastgan', 'fastgan_lite']:
+        c.G_kwargs = dnnlib.EasyDict(class_name='training.networks.fastgan.Generator', cond=opts.cond, synthesis_kwargs=dnnlib.EasyDict())
+        c.G_kwargs.synthesis_kwargs.lite = (opts.cfg == 'fastgan_lite')
+        c.G_opt_kwargs.lr = 0.0002
+        c.D_kwargs.backbone_kwargs.separable = True
     else:
-        c.G_kwargs.class_name = 'training.networks_stylegan3.Generator'
+        c.G_opt_kwargs.lr = 0.00025
+        c.G_kwargs.class_name = 'training.networks.stylegan3.Generator'
         c.G_kwargs.magnitude_ema_beta = 0.5 ** (c.batch_size / (20 * 1e3))
         if opts.cfg == 'stylegan3-r':
             c.G_kwargs.conv_kernel = 1 # Use 1x1 convolutions.
@@ -265,6 +304,9 @@ def main(**kwargs):
             c.G_kwargs.use_radial_filters = True # Use radially symmetric downsampling filters.
             c.loss_kwargs.blur_init_sigma = 10 # Blur the images seen by the discriminator.
             c.loss_kwargs.blur_fade_kimg = c.batch_size * 200 / 32 # Fade out the blur during the first N kimg.
+    if opts.glr is not None:
+        c.G_opt_kwargs.lr = opts.glr
+    c.D_opt_kwargs.lr = opts.dlr
 
     # Augmentation.
     if opts.aug != 'noaug':
@@ -292,6 +334,14 @@ def main(**kwargs):
         c.ada_kimg = 100 # Make ADA react faster at the beginning.
         c.ema_rampup = None # Disable EMA rampup.
         c.loss_kwargs.blur_init_sigma = 0 # Disable blur rampup.
+    # Resume.
+    if opts.resume is not None:
+        c.resume_pkl = opts.resume
+        c.ema_rampup = None  # Disable EMA rampup.
+
+    # Restart.
+    c.restart_every = opts.restart_every
+
 
     # Performance-related toggles.
     if opts.fp32:
@@ -301,16 +351,23 @@ def main(**kwargs):
         c.cudnn_benchmark = False
 
     # Description string.
-    desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}-gamma{c.loss_kwargs.r1_gamma:g}'
+    desc = f'{opts.cfg:s}-{dataset_name:s}-gpus{c.num_gpus:d}-batch{c.batch_size:d}'
     if opts.desc is not None:
         desc += f'-{opts.desc}'
 
     # Launch.
     launch_training(c=c, desc=desc, outdir=opts.outdir, dry_run=opts.dry_run)
 
-#----------------------------------------------------------------------------
+    # Check for restart
+    last_snapshot = misc.get_ckpt_path(c.run_dir)
+    if os.path.isfile(last_snapshot):
+        # get current number of training images
+        with dnnlib.util.open_url(last_snapshot) as f:
+            cur_nimg = legacy.load_network_pkl(f)['progress']['cur_nimg'].item()
+        if (cur_nimg//1000) < c.total_kimg:
+            print('Restart: exit with code 3')
+            exit(3)
+
 
 if __name__ == "__main__":
     main() # pylint: disable=no-value-for-parameter
-
-#----------------------------------------------------------------------------

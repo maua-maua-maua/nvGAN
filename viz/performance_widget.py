@@ -7,8 +7,10 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import array
-import numpy as np
+
 import imgui
+import numpy as np
+
 from gui_utils import imgui_utils
 
 #----------------------------------------------------------------------------

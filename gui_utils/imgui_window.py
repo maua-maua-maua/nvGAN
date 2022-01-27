@@ -7,12 +7,11 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import os
+
 import imgui
 import imgui.integrations.glfw
 
-from . import glfw_window
-from . import imgui_utils
-from . import text_utils
+from . import glfw_window, imgui_utils, text_utils
 
 #----------------------------------------------------------------------------
 

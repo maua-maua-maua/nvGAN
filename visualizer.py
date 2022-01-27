@@ -6,28 +6,21 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-import click
 import os
 
+import click
 import torch.multiprocessing as multiprocessing
+
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn')
-import numpy as np
 import imgui
+import numpy as np
+
 import dnnlib
-from gui_utils import imgui_window
-from gui_utils import imgui_utils
-from gui_utils import gl_utils
-from gui_utils import text_utils
-from viz import renderer
-from viz import pickle_widget
-from viz import latent_widget
-from viz import stylemix_widget
-from viz import trunc_noise_widget
-from viz import performance_widget
-from viz import capture_widget
-from viz import layer_widget
-from viz import equivariance_widget
+from gui_utils import gl_utils, imgui_utils, imgui_window, text_utils
+from viz import (capture_widget, equivariance_widget, latent_widget,
+                 layer_widget, performance_widget, pickle_widget, renderer,
+                 stylemix_widget, trunc_noise_widget)
 
 #----------------------------------------------------------------------------
 

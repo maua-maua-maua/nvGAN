@@ -8,20 +8,18 @@
 
 """Calculate quality metrics for previous training run or pretrained network pickle."""
 
-import os
-import click
-import json
-import tempfile
 import copy
+import json
+import os
+import tempfile
+
+import click
 import torch
 
 import dnnlib
 import legacy
-from metrics import metric_main
-from metrics import metric_utils
-from torch_utils import training_stats
-from torch_utils import custom_ops
-from torch_utils import misc
+from metrics import metric_main, metric_utils
+from torch_utils import custom_ops, misc, training_stats
 from torch_utils.ops import conv2d_gradfix
 
 #----------------------------------------------------------------------------
@@ -64,7 +62,7 @@ def subprocess_fn(rank, args, temp_dir):
             print(f'Calculating {metric}...')
         progress = metric_utils.ProgressMonitor(verbose=args.verbose)
         result_dict = metric_main.calc_metric(metric=metric, G=G, dataset_kwargs=args.dataset_kwargs,
-            num_gpus=args.num_gpus, rank=rank, device=device, progress=progress)
+            num_gpus=args.num_gpus, rank=rank, device=device, progress=progress, snapshot_pkl=args.network_pkl)
         if rank == 0:
             metric_main.report_metric(result_dict, run_dir=args.run_dir, snapshot_pkl=args.network_pkl)
         if rank == 0 and args.verbose:

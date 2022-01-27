@@ -10,14 +10,12 @@
 "Alias-Free Generative Adversarial Networks"."""
 
 import numpy as np
-import scipy.signal
 import scipy.optimize
+import scipy.signal
 import torch
-from torch_utils import misc
-from torch_utils import persistence
-from torch_utils.ops import conv2d_gradfix
-from torch_utils.ops import filtered_lrelu
-from torch_utils.ops import bias_act
+
+from ..torch_utils import misc, persistence
+from ..torch_utils.ops import bias_act, conv2d_gradfix, filtered_lrelu
 
 #----------------------------------------------------------------------------
 

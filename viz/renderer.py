@@ -6,17 +6,19 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-import sys
 import copy
+import sys
 import traceback
+
+import matplotlib.cm
 import numpy as np
 import torch
 import torch.fft
 import torch.nn
-import matplotlib.cm
+
 import dnnlib
+import legacy  # pylint: disable=import-error
 from torch_utils.ops import upfirdn2d
-import legacy # pylint: disable=import-error
 
 #----------------------------------------------------------------------------
 

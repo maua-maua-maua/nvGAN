@@ -11,6 +11,7 @@ GANs". Matches the original implementation by Salimans et al. at
 https://github.com/openai/improved-gan/blob/master/inception_score/model.py"""
 
 import numpy as np
+
 from . import metric_utils
 
 #----------------------------------------------------------------------------

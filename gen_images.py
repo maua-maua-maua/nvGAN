@@ -13,11 +13,11 @@ import re
 from typing import List, Optional, Tuple, Union
 
 import click
-import dnnlib
 import numpy as np
 import PIL.Image
 import torch
 
+import dnnlib
 import legacy
 
 #----------------------------------------------------------------------------
@@ -122,7 +122,7 @@ def generate_images(
     # Generate images.
     for seed_idx, seed in enumerate(seeds):
         print('Generating image for seed %d (%d/%d) ...' % (seed, seed_idx, len(seeds)))
-        z = torch.from_numpy(np.random.RandomState(seed).randn(1, G.z_dim)).to(device)
+        z = torch.from_numpy(np.random.RandomState(seed).randn(1, G.z_dim)).to(device).float()
 
         # Construct an inverse rotation/translation matrix and pass to the generator.  The
         # generator expects this matrix as an inverse to avoid potentially failing numerical

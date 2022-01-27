@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
 
 import click
+import imageio
 import numpy as np
 import PIL.Image
 from tqdm import tqdm
@@ -232,7 +233,12 @@ def make_transform(
     def center_crop(width, height, img):
         crop = np.min(img.shape[:2])
         img = img[(img.shape[0] - crop) // 2 : (img.shape[0] + crop) // 2, (img.shape[1] - crop) // 2 : (img.shape[1] + crop) // 2]
-        img = PIL.Image.fromarray(img, 'RGB')
+
+        if len(img.shape) == 2:
+            img = PIL.Image.fromarray(img, 'L').convert('RGB')
+        else:
+            img = PIL.Image.fromarray(img, 'RGB')
+
         img = img.resize((width, height), PIL.Image.LANCZOS)
         return np.array(img)
 

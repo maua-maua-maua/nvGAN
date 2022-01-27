@@ -7,8 +7,10 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import time
+
 import glfw
 import OpenGL.GL as gl
+
 from . import gl_utils
 
 #----------------------------------------------------------------------------
