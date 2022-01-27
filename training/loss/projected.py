@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch_utils import training_stats
 from torch_utils.ops import upfirdn2d
 
-from .base import Loss
+from . import Loss
 
 
 class ProjectedGANLoss(Loss):

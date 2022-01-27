@@ -14,8 +14,8 @@ import scipy.optimize
 import scipy.signal
 import torch
 
-from ..torch_utils import misc, persistence
-from ..torch_utils.ops import bias_act, conv2d_gradfix, filtered_lrelu
+from torch_utils import misc, persistence
+from torch_utils.ops import bias_act, conv2d_gradfix, filtered_lrelu
 
 #----------------------------------------------------------------------------
 

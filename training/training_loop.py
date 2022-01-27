@@ -197,11 +197,11 @@ def training_loop(
     # Setup augmentation.
     modules = [G, D, G_ema]
     augment_pipe = None
+    ada_stats = None
 
     if not projected:
         if rank == 0:
             print('Setting up augmentation...')
-        ada_stats = None
         if (augment_kwargs is not None) and (augment_p > 0 or ada_target is not None):
             augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
             augment_pipe.p.copy_(torch.as_tensor(augment_p))
@@ -415,15 +415,18 @@ def training_loop(
         snapshot_data = None
         if (network_snapshot_ticks is not None) and (done or cur_tick % network_snapshot_ticks == 0):
             snapshot_data = dict(G=G, D=D, G_ema=G_ema, augment_pipe=augment_pipe, training_set_kwargs=dict(training_set_kwargs))
-            for key, value in snapshot_data.items():
-                if isinstance(value, torch.nn.Module):
-                    value = copy.deepcopy(value).eval().requires_grad_(False)
-                    if num_gpus > 1:
-                        misc.check_ddp_consistency(value, ignore_regex=r'.*\.[^.]+_(avg|ema)')
-                        for param in misc.params_and_buffers(value):
-                            torch.distributed.broadcast(param, src=0)
-                    snapshot_data[key] = value.cpu()
-                del value # conserve memory
+
+            # TODO figure out what this is for (deepcopy errors with projected GAN). Does using dill replace this?
+            # for key, value in snapshot_data.items():
+            #     if isinstance(value, torch.nn.Module):
+            #         value = copy.deepcopy(value).eval().requires_grad_(False)
+            #         if num_gpus > 1:
+            #             misc.check_ddp_consistency(value, ignore_regex=r'.*\.[^.]+_(avg|ema)')
+            #             for param in misc.params_and_buffers(value):
+            #                 torch.distributed.broadcast(param, src=0)
+            #         snapshot_data[key] = value.cpu()
+            #     del value # conserve memory
+
             snapshot_pkl = os.path.join(run_dir, f'network-snapshot-{cur_nimg//1000:06d}.pkl')
             if rank == 0:
                 with open(snapshot_pkl, 'wb') as f:

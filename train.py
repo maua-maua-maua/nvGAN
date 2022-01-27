@@ -145,7 +145,6 @@ def locate_latest_pkl(outdir: str):
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
 @click.option('--batch',        help='Total batch size', metavar='INT',                         type=click.IntRange(min=1), required=True)
-@click.option('--gamma',        help='R1 regularization weight', metavar='FLOAT',               type=click.FloatRange(min=0), required=True)
 
 # Optional features.
 @click.option('--cond',         help='Train conditional model', metavar='BOOL',                 type=bool, default=False, show_default=True)
@@ -158,11 +157,12 @@ def locate_latest_pkl(outdir: str):
 @click.option('--initstrength', help='Override ADA strength at start',                          type=click.FloatRange(min=0))
 
 # Misc hyperparameters.
+@click.option('--gamma',        help='R1 regularization weight', metavar='FLOAT',               type=click.FloatRange(min=0))
+@click.option('--z-dim',        help='Size of normal z latent vector', metavar='FLOAT',         type=click.IntRange(min=0))
+@click.option('--w-dim',        help='Size of disentangled w latent vector', metavar='FLOAT',   type=click.IntRange(min=0))
 @click.option('--p',            help='Probability for --aug=fixed', metavar='FLOAT',            type=click.FloatRange(min=0, max=1), default=0.2, show_default=True)
 @click.option('--target',       help='Target value for --aug=ada', metavar='FLOAT',             type=click.FloatRange(min=0, max=1), default=0.6, show_default=True)
 @click.option('--resume',       help='Resume from given network pickle', metavar='[PATH|URL]',  type=str)
-
-# Misc hyperparameters.
 @click.option('--batch-gpu',    help='Limit batch size per GPU', metavar='INT',                 type=click.IntRange(min=1))
 @click.option('--cbase',        help='Capacity multiplier', metavar='INT',                      type=click.IntRange(min=1), default=32768, show_default=True)
 @click.option('--cmax',         help='Max. feature maps', metavar='INT',                        type=click.IntRange(min=1), default=512, show_default=True)
@@ -176,7 +176,7 @@ def locate_latest_pkl(outdir: str):
 @click.option('--metrics',      help='Quality metrics', metavar='[NAME|A,B,C|none]',            type=parse_comma_separated_list, default='fid50k_full', show_default=True)
 @click.option('--kimg',         help='Total training duration', metavar='KIMG',                 type=click.IntRange(min=1), default=25000, show_default=True)
 @click.option('--tick',         help='How often to print progress', metavar='KIMG',             type=click.IntRange(min=1), default=4, show_default=True)
-@click.option('--snap',         help='How often to save snapshots', metavar='TICKS',            type=click.IntRange(min=1), default=50, show_default=True)
+@click.option('--snap',         help='How often to save snapshots', metavar='TICKS',            type=click.IntRange(min=1), default=25, show_default=True)
 @click.option('--seed',         help='Random seed', metavar='INT',                              type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--fp32',         help='Disable mixed-precision', metavar='BOOL',                 type=bool, default=False, show_default=True)
 @click.option('--nobench',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
@@ -211,10 +211,23 @@ def main(**kwargs):
     opts = dnnlib.EasyDict(kwargs) # Command line arguments.
     c = dnnlib.EasyDict() # Main config dict.
 
-    if opts.cfg in ['fastgan', 'fastgan_lite', 'stylegan2-pg']:
-        c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=64, w_dim=128, mapping_kwargs=dnnlib.EasyDict())
+    # Training set.
+    c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
+    c.training_set_kwargs, dataset_name = init_dataset_kwargs(data=opts.data)
+    if opts.cond and not c.training_set_kwargs.use_labels:
+        raise click.ClickException('--cond=True requires labels specified in dataset.json')
+    c.training_set_kwargs.use_labels = opts.cond
+    c.training_set_kwargs.xflip = opts.mirror
+    c.training_set_kwargs.yflip = opts.mirrory
+
+    # Model configuration
+    projected = opts.cfg in ['fastgan', 'fastgan_lite', 'stylegan2-pg']
+    if projected:
+        c.G_kwargs = dnnlib.EasyDict(class_name=None, mapping_kwargs=dnnlib.EasyDict())
+        c.G_kwargs.z_dim = opts.z_dim if opts.z_dim else 64
+        c.G_kwargs.w_dim = opts.w_dim if opts.w_dim else 128
         c.D_kwargs = dnnlib.EasyDict(
-            class_name='training.networks.projected_discriminator.ProjectedDiscriminator',
+            class_name='networks.projected_discriminator.ProjectedDiscriminator',
             diffaug=True,
             interp224=(c.training_set_kwargs.resolution < 224),
             backbone_kwargs=dnnlib.EasyDict(),
@@ -224,42 +237,37 @@ def main(**kwargs):
         c.D_kwargs.backbone_kwargs.proj_type = 2
         c.D_kwargs.backbone_kwargs.num_discs = 4
         c.D_kwargs.backbone_kwargs.cond = opts.cond
-        c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.ProjectedGANLoss')
+        c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.projected.ProjectedGANLoss')
     else:
-        c.G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
-        c.D_kwargs = dnnlib.EasyDict(class_name='training.networks.stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
-        c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss')
+        c.G_kwargs = dnnlib.EasyDict(class_name=None, mapping_kwargs=dnnlib.EasyDict())
+        c.G_kwargs.z_dim = opts.z_dim if opts.z_dim else 512
+        c.G_kwargs.w_dim = opts.w_dim if opts.w_dim else 512
+        c.D_kwargs = dnnlib.EasyDict(class_name='networks.stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
+        c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.stylegan2.StyleGAN2Loss')
+        c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
+        c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
 
     c.G_kwargs.channel_base = c.D_kwargs.channel_base = opts.cbase
     c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
+    c.G_kwargs.mapping_kwargs.num_layers = (8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
+    if opts.gamma is None:
+        opts.gamma = 0.0002 * (c.training_set_kwargs.resolution ** 2) / opts.batch
+    else:
+        c.loss_kwargs.r1_gamma = opts.gamma
 
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
-
-    c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
-
-    # Training set.
-    c.training_set_kwargs, dataset_name = init_dataset_kwargs(data=opts.data)
-    if opts.cond and not c.training_set_kwargs.use_labels:
-        raise click.ClickException('--cond=True requires labels specified in dataset.json')
-    c.training_set_kwargs.use_labels = opts.cond
-    c.training_set_kwargs.xflip = opts.mirror
-    c.training_set_kwargs.yflip = opts.mirrory
 
     # Hyperparameters & settings.
     c.num_gpus = opts.gpus
     c.batch_size = opts.batch
     c.batch_gpu = opts.batch_gpu or opts.batch // opts.gpus
-
-    c.G_kwargs.mapping_kwargs.num_layers = (8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
-    c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
-    c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
-    c.loss_kwargs.r1_gamma = opts.gamma
     
     c.metrics = opts.metrics
     c.total_kimg = opts.kimg
     c.kimg_per_tick = opts.tick
-    c.image_snapshot_ticks = c.network_snapshot_ticks = opts.snap
+    c.image_snapshot_ticks = 1
+    c.network_snapshot_ticks = opts.snap
     c.random_seed = c.training_set_kwargs.random_seed = opts.seed
     c.data_loader_kwargs.num_workers = opts.workers
 
@@ -268,7 +276,7 @@ def main(**kwargs):
         raise click.ClickException('--batch must be a multiple of --gpus')
     if c.batch_size % (c.num_gpus * c.batch_gpu) != 0:
         raise click.ClickException('--batch must be a multiple of --gpus times --batch-gpu')
-    if c.batch_gpu < c.D_kwargs.epilogue_kwargs.mbstd_group_size:
+    if not projected and c.batch_gpu < c.D_kwargs.epilogue_kwargs.mbstd_group_size:
         raise click.ClickException('--batch-gpu cannot be smaller than --mbstd')
     if any(not metric_main.is_valid_metric(metric) for metric in c.metrics):
         raise click.ClickException('\n'.join(['--metrics can only contain the following values:'] + metric_main.list_valid_metrics()))
@@ -276,7 +284,7 @@ def main(**kwargs):
     # Base configuration.
     c.ema_kimg = c.batch_size * 10 / 32
     if opts.cfg == 'stylegan2':
-        c.G_kwargs.class_name = 'training.networks.stylegan2.Generator'
+        c.G_kwargs.class_name = 'networks.stylegan2.Generator'
         c.loss_kwargs.style_mixing_prob = 0.9 # Enable style mixing regularization.
         c.loss_kwargs.pl_weight = 2 # Enable path length regularization.
         c.G_reg_interval = 4 # Enable lazy regularization for G.
@@ -284,18 +292,18 @@ def main(**kwargs):
         c.loss_kwargs.pl_no_weight_grad = True # Speed up path length regularization by skipping gradient computation wrt. conv2d weights.
         c.G_opt_kwargs.lr = 0.0002
     elif opts.cfg == 'stylegan2-pg':
-        c.G_kwargs.class_name = 'training.networks.stylegan2.Generator'
+        c.G_kwargs.class_name = 'networks.stylegan2.Generator'
         c.G_kwargs.fused_modconv_default = 'inference_only' # Speed up training by using regular convolutions instead of grouped convolutions.
         c.D_kwargs.backbone_kwargs.separable = False
         c.G_opt_kwargs.lr = 0.00025
     elif opts.cfg in ['fastgan', 'fastgan_lite']:
-        c.G_kwargs = dnnlib.EasyDict(class_name='training.networks.fastgan.Generator', cond=opts.cond, synthesis_kwargs=dnnlib.EasyDict())
+        c.G_kwargs = dnnlib.EasyDict(class_name='networks.fastgan.Generator', cond=opts.cond, synthesis_kwargs=dnnlib.EasyDict())
         c.G_kwargs.synthesis_kwargs.lite = (opts.cfg == 'fastgan_lite')
         c.G_opt_kwargs.lr = 0.0002
         c.D_kwargs.backbone_kwargs.separable = True
     else:
         c.G_opt_kwargs.lr = 0.00025
-        c.G_kwargs.class_name = 'training.networks.stylegan3.Generator'
+        c.G_kwargs.class_name = 'networks.stylegan3.Generator'
         c.G_kwargs.magnitude_ema_beta = 0.5 ** (c.batch_size / (20 * 1e3))
         if opts.cfg == 'stylegan3-r':
             c.G_kwargs.conv_kernel = 1 # Use 1x1 convolutions.
