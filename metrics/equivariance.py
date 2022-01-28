@@ -108,7 +108,7 @@ def construct_affine_bandlimit_filter(mat, a=3, amax=16, aflt=64, up=4, cutoff_i
 
     # Construct 2D filter taps in input & output coordinate spaces.
     taps = ((torch.arange(aflt * up * 2 - 1, device=mat.device) + 1) / up - aflt).roll(1 - aflt * up)
-    yi, xi = torch.meshgrid(taps, taps)
+    yi, xi = torch.meshgrid(taps, taps, indexing='ij')
     xo, yo = (torch.stack([xi, yi], dim=2) @ mat[:2, :2].t()).unbind(2)
 
     # Convolution of two oriented 2D sinc filters.

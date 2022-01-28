@@ -175,7 +175,9 @@ class ProjectedDiscriminator(torch.nn.Module):
     def eval(self):
         return self.train(False)
 
-    def forward(self, x, c):
+    def forward(self, x, c, update_emas=False):
+        _ = update_emas # unused
+        
         if self.diffaug:
             x = DiffAugment(x, policy='color,translation,cutout')
 

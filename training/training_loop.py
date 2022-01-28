@@ -8,6 +8,7 @@
 #
 # modified by Axel Sauer for "Projected GANs Converge Faster"
 #
+# modified by Hans Brouwer for Maua
 
 
 """Main training loop."""
@@ -15,7 +16,6 @@
 import copy
 import json
 import os
-import pickle
 import time
 
 import dill
@@ -23,7 +23,6 @@ import numpy as np
 import PIL.Image
 import psutil
 import torch
-import torch.nn.functional as F
 
 import dnnlib
 import legacy
@@ -118,8 +117,8 @@ def training_loop(
     ada_kimg                = 500,      # ADA adjustment speed, measured in how many kimg it takes for p to increase/decrease by one unit.
     total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.
     kimg_per_tick           = 4,        # Progress snapshot interval.
-    image_snapshot_ticks    = 50,       # How often to save image snapshots? None = disable.
-    network_snapshot_ticks  = 50,       # How often to save network snapshots? None = disable.
+    image_snapshot_ticks    = 1,        # How often to save image snapshots? None = disable.
+    network_snapshot_ticks  = 25,       # How often to save network snapshots? None = disable.
     resume_pkl              = None,     # Network pickle to resume training from.
     resume_kimg             = 0,        # First kimg to report when resuming training.
     cudnn_benchmark         = True,     # Enable torch.backends.cudnn.benchmark?

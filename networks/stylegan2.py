@@ -760,6 +760,7 @@ class Discriminator(torch.nn.Module):
 
     def forward(self, img, c, update_emas=False, **block_kwargs):
         _ = update_emas # unused
+        
         x = None
         for res in self.block_resolutions:
             block = getattr(self, f'b{res}')
