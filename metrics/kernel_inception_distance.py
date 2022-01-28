@@ -23,7 +23,7 @@ def compute_kid(opts, max_real, num_gen, num_subsets, max_subset_size):
 
     real_features = metric_utils.compute_feature_stats_for_dataset(
         opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,
-        rel_lo=0, rel_hi=0, capture_all=True, max_items=max_real).get_all()
+        rel_lo=0, rel_hi=0, capture_all=True, max_items=max_real, use_image_dataset=True).get_all()
 
     gen_features = metric_utils.compute_feature_stats_for_generator(
         opts=opts, detector_url=detector_url, detector_kwargs=detector_kwargs,

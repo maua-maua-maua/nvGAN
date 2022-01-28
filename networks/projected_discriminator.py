@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from training.diffaug import DiffAugment
+from training.augment.diffaug import DiffAugment
 
 from .blocks import DownBlock, DownBlockPatch, conv2d
 from .projector import F_RandomProj

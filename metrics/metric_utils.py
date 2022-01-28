@@ -14,17 +14,20 @@ import os
 import pickle
 import time
 import uuid
+from urllib.parse import urlparse
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 import dnnlib
+from training.dataset.video import video_to_image_dataset_kwargs
 
 #----------------------------------------------------------------------------
 
 class MetricOptions:
-    def __init__(self, G=None, G_kwargs={}, dataset_kwargs={}, num_gpus=1, rank=0, device=None, progress=None, cache=True, run_dir=None, cur_nimg=None, snapshot_pkl=None):
+    def __init__(self, G=None, G_kwargs={}, dataset_kwargs={}, num_gpus=1, rank=0, device=None,
+                       progress=None, cache=True, run_dir=None, cur_nimg=None, snapshot_pkl=None):
         assert 0 <= rank < num_gpus
         self.G              = G
         self.G_kwargs       = dnnlib.EasyDict(G_kwargs)
@@ -53,7 +56,10 @@ def get_feature_detector(url, device=torch.device('cpu'), num_gpus=1, rank=0, ve
         if not is_leader and num_gpus > 1:
             torch.distributed.barrier() # leader goes first
         with dnnlib.util.open_url(url, verbose=(verbose and is_leader)) as f:
-            _feature_detector_cache[key] = pickle.load(f).to(device)
+            if urlparse(url).path.endswith('.pkl'): # TODO: check for .pkl after urllib.parse
+                _feature_detector_cache[key] = pickle.load(f).to(device)
+            else:
+                _feature_detector_cache[key] = torch.jit.load(f).eval().to(device)
         if is_leader and num_gpus > 1:
             torch.distributed.barrier() # others follow
     return _feature_detector_cache[key]
@@ -170,8 +176,8 @@ class ProgressMonitor:
         if self.progress_fn is not None:
             self.progress_fn(self.pfn_lo, self.pfn_total)
 
-    def update(self, cur_items):
-        assert (self.num_items is None) or (cur_items <= self.num_items)
+    def update(self, cur_items: int):
+        assert (self.num_items is None) or (cur_items <= self.num_items), f"Wrong `items` values: cur_items={cur_items}, self.num_items={self.num_items}"
         if (cur_items < self.batch_items + self.flush_interval) and (self.num_items is None or cur_items < self.num_items):
             return
         cur_time = time.time()
@@ -199,22 +205,30 @@ class ProgressMonitor:
 
 #----------------------------------------------------------------------------
 
-def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_lo=0, rel_hi=1, batch_size=64, data_loader_kwargs=None, max_items=None, swav=False, sfid=False,  **stats_kwargs):
-    dataset = dnnlib.util.construct_class_by_name(**opts.dataset_kwargs)
+@torch.no_grad()
+def compute_feature_stats_for_dataset(
+    opts, detector_url, detector_kwargs, rel_lo=0, rel_hi=1, batch_size=64,
+    data_loader_kwargs=None, max_items=None, temporal_detector=False, use_image_dataset=False,
+    feature_stats_cls=FeatureStats, **stats_kwargs):
+
+    if 'Video' in opts.dataset_kwargs.class_name:
+        dataset_kwargs = video_to_image_dataset_kwargs(opts.dataset_kwargs) if use_image_dataset else opts.dataset_kwargs
+    else:
+        dataset_kwargs = opts.dataset_kwargs
+    dataset = dnnlib.util.construct_class_by_name(**dataset_kwargs)
+
     if data_loader_kwargs is None:
         data_loader_kwargs = dict(pin_memory=True, num_workers=3, prefetch_factor=2)
 
     # Try to lookup from cache.
     cache_file = None
     if opts.cache:
-        det_name = get_feature_detector_name(detector_url)
-
         # Choose cache file name.
-        args = dict(dataset_kwargs=opts.dataset_kwargs, detector_url=detector_url, detector_kwargs=detector_kwargs, stats_kwargs=stats_kwargs)
+        args = dict(dataset_kwargs=opts.dataset_kwargs, detector_url=detector_url, detector_kwargs=detector_kwargs,
+                    stats_kwargs=stats_kwargs, feature_stats_cls=feature_stats_cls.__name__)
         md5 = hashlib.md5(repr(sorted(args.items())).encode('utf-8'))
-        cache_tag = f'{dataset.name}-{det_name}-{md5.hexdigest()}'
-        cache_file = os.path.join('.', 'dnnlib', 'gan-metrics', cache_tag + '.pkl')
-        # cache_file = dnnlib.make_cache_dir_path('gan-metrics', cache_tag + '.pkl')
+        cache_tag = f'{dataset.name}-{get_feature_detector_name(detector_url)}-{md5.hexdigest()}'
+        cache_file = dnnlib.make_cache_dir_path('gan-metrics', cache_tag + '.pkl')
 
         # Check if the file exists (all processes must agree).
         flag = os.path.isfile(cache_file) if opts.rank == 0 else False
@@ -225,7 +239,7 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
 
         # Load.
         if flag:
-            return FeatureStats.load(cache_file)
+            return feature_stats_cls.load(cache_file)
 
     print('Calculating the stats for this dataset the first time\n')
     print(f'Saving them to {cache_file}')
@@ -234,21 +248,25 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
     num_items = len(dataset)
     if max_items is not None:
         num_items = min(num_items, max_items)
-    stats = FeatureStats(max_items=num_items, **stats_kwargs)
+    stats = feature_stats_cls(max_items=num_items, **stats_kwargs)
     progress = opts.progress.sub(tag='dataset features', num_items=num_items, rel_lo=rel_lo, rel_hi=rel_hi)
-
-    # get detector
     detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
 
     # Main loop.
     item_subset = [(i * opts.num_gpus + opts.rank) % num_items for i in range((num_items - 1) // opts.num_gpus + 1)]
-    for images, _labels in tqdm(torch.utils.data.DataLoader(dataset=dataset, sampler=item_subset, batch_size=batch_size, **data_loader_kwargs)):
-        if images.shape[1] == 1:
-            images = images.repeat([1, 3, 1, 1])
+    for batch in tqdm(torch.utils.data.DataLoader(dataset=dataset, sampler=item_subset, batch_size=batch_size, **data_loader_kwargs)):
+        if isinstance(batch, dict):
+            images = batch['image']
+            if temporal_detector:
+                images = images.permute(0, 2, 1, 3, 4).contiguous() # [batch_size, c, t, h, w]
+            else:
+                images = images.view(-1, *images.shape[-3:]) # [-1, c, h, w]
+        else:
+            images, _ = batch
+            if images.shape[1] == 1:
+                images = images.repeat([1, 3, 1, 1])
 
-        with torch.no_grad():
-            features = detector(images.to(opts.device), **detector_kwargs)
-
+        features = detector(images.to(opts.device), **detector_kwargs)
         stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
         progress.update(stats.num_items)
 
@@ -262,7 +280,12 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
 
 #----------------------------------------------------------------------------
 
-def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel_lo=0, rel_hi=1, batch_size=64, batch_gen=None, swav=False, sfid=False, **stats_kwargs):
+@torch.no_grad()
+def compute_feature_stats_for_generator(
+    opts, detector_url, detector_kwargs, rel_lo=0, rel_hi=1, batch_size: int=16,
+    batch_gen=None, jit=False, temporal_detector=False, num_video_frames: int=16,
+    feature_stats_cls=FeatureStats, subsample_factor: int=1, **stats_kwargs):
+
     if batch_gen is None:
         batch_gen = min(batch_size, 4)
     assert batch_size % batch_gen == 0
@@ -270,30 +293,83 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
     # Setup generator and labels.
     G = copy.deepcopy(opts.G).eval().requires_grad_(False).to(opts.device)
     c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen)
+    dataset = dnnlib.util.construct_class_by_name(**opts.dataset_kwargs)
 
     # Initialize.
-    stats = FeatureStats(**stats_kwargs)
+    stats = feature_stats_cls(**stats_kwargs)
     assert stats.max_items is not None
     progress = opts.progress.sub(tag='generator features', num_items=stats.max_items, rel_lo=rel_lo, rel_hi=rel_hi)
-
-    # get detector
     detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
 
-    # Main loop.
-    while not stats.is_full():
-        images = []
-        for _i in range(batch_size // batch_gen):
-            z = torch.randn([batch_gen, G.z_dim], device=opts.device)
-            img = G(z=z, c=next(c_iter), **opts.G_kwargs)
+    if not 'Video' in opts.dataset_kwargs.class_name:
+
+        # Image loop.
+        while not stats.is_full():
+            images = []
+            for _i in range(batch_size // batch_gen):
+                z = torch.randn([batch_gen, G.z_dim], device=opts.device)
+                img = G(z=z, c=next(c_iter), **opts.G_kwargs)
+                img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+                images.append(img)
+            images = torch.cat(images)
+            if images.shape[1] == 1:
+                images = images.repeat([1, 3, 1, 1])
+
+            with torch.no_grad():
+                features = detector(images.to(opts.device), **detector_kwargs)
+
+            stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
+            progress.update(stats.num_items)
+        return stats
+
+    else:
+            
+        def run_generator(z, c, t, l):
+            img = G(z=z, c=c, t=t, l=l, **opts.G_kwargs)
+            bt, c, h, w = img.shape
+            if temporal_detector:
+                img = img.view(bt // num_video_frames, num_video_frames, c, h, w) # [batch_size, t, c, h, w]
+                img = img.permute(0, 2, 1, 3, 4).contiguous() # [batch_size, c, t, h, w]
             img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-            images.append(img)
-        images = torch.cat(images)
-        if images.shape[1] == 1:
-            images = images.repeat([1, 3, 1, 1])
+            return img
 
-        with torch.no_grad():
-            features = detector(images.to(opts.device), **detector_kwargs)
+        if jit:
+            z = torch.zeros([batch_gen, G.z_dim], device=opts.device)
+            c = torch.zeros([batch_gen, G.c_dim], device=opts.device)
+            t = torch.zeros([batch_gen, G.cfg.num_frames_per_sample], device=opts.device)
+            l = torch.zeros([batch_gen], device=opts.device)
+            run_generator = torch.jit.trace(run_generator, [z, c, t, l], check_trace=False)
 
-        stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
-        progress.update(stats.num_items)
-    return stats
+        while not stats.is_full():
+            images = []
+            for _i in range(batch_size // batch_gen):
+                z = torch.randn([batch_gen, G.z_dim], device=opts.device)
+                cond_sample_idx = [np.random.randint(len(dataset)) for _ in range(batch_gen)]
+                c = [dataset.get_label(i) for i in cond_sample_idx]
+                c = torch.from_numpy(np.stack(c)).pin_memory().to(opts.device)
+                t = [list(range(0, num_video_frames * subsample_factor, subsample_factor)) for _i in range(batch_gen)]
+                t = torch.from_numpy(np.stack(t)).pin_memory().to(opts.device)
+                l = [dataset.get_video_len(i) for i in cond_sample_idx]
+                l = torch.from_numpy(np.stack(l)).pin_memory().to(opts.device)
+                images.append(run_generator(z, c, t, l))
+            images = torch.cat(images)
+            if images.shape[1] == 1:
+                images = images.repeat([1, 3, *([1] * (images.ndim - 2))])
+            features = detector(images, **detector_kwargs)
+            stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
+            progress.update(stats.num_items)
+        return stats
+
+#----------------------------------------------------------------------------
+
+def rewrite_opts_for_gen_dataset(opts):
+    """
+    Updates dataset arguments in the opts to enable the second dataset stats computation
+    """
+    new_opts = copy.deepcopy(opts)
+    new_opts.dataset_kwargs = new_opts.gen_dataset_kwargs
+    new_opts.cache = False
+
+    return new_opts
+
+#----------------------------------------------------------------------------

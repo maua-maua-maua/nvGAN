@@ -107,13 +107,20 @@ def launch_training(c, desc, outdir, dry_run):
             torch.multiprocessing.spawn(fn=subprocess_fn, args=(c, temp_dir), nprocs=c.num_gpus)
 
 
-def init_dataset_kwargs(data):
+def init_dataset_kwargs(data, video=False):
     try:
-        dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True, max_size=None, xflip=False)
-        dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs) # Subclass of training.dataset.Dataset.
-        dataset_kwargs.resolution = dataset_obj.resolution # Be explicit about resolution.
-        dataset_kwargs.use_labels = dataset_obj.has_labels # Be explicit about labels.
-        dataset_kwargs.max_size = len(dataset_obj) # Be explicit about dataset size.
+        if video:
+            dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.video.VideoFramesFolderDataset', path=data, use_labels=True, max_size=None, xflip=False)
+            dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs) # Subclass of training.dataset.Dataset.
+            dataset_kwargs.resolution = dataset_obj.resolution # Be explicit about resolution.
+            dataset_kwargs.use_labels = dataset_obj.has_labels # Be explicit about labels.
+            dataset_kwargs.max_size = len(dataset_obj) # Be explicit about dataset size.
+        else:
+            dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.image.ImageFolderDataset', path=data, use_labels=True, max_size=None, xflip=False)
+            dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs) # Subclass of training.dataset.Dataset.
+            dataset_kwargs.resolution = dataset_obj.resolution # Be explicit about resolution.
+            dataset_kwargs.use_labels = dataset_obj.has_labels # Be explicit about labels.
+            dataset_kwargs.max_size = len(dataset_obj) # Be explicit about dataset size.
         return dataset_kwargs, dataset_obj.name
     except IOError as err:
         raise click.ClickException(f'--data: {err}')
@@ -150,6 +157,7 @@ def locate_latest_pkl(outdir: str):
 
 # Misc hyperparameters.
 @click.option('--projected',    help='Use projected discriminator', metavar='BOOL',             type=bool, is_flag=True, show_default=True)
+@click.option('--video',        help='Train on a video dataset', metavar='BOOL',                type=bool, is_flag=True, show_default=True)
 @click.option('--gamma',        help='R1 regularization weight', metavar='FLOAT',               type=click.FloatRange(min=0))
 @click.option('--style_mix_p',  help='Style mixing probability', metavar='FLOAT',               type=click.FloatRange(min=0))
 @click.option('--pl_weight',    help='Path length regularization weight', metavar='FLOAT',      type=click.FloatRange(min=0))
@@ -185,6 +193,7 @@ def locate_latest_pkl(outdir: str):
 @click.option('--seed',         help='Random seed', metavar='INT',                              type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--fp32',         help='Disable mixed-precision', metavar='BOOL',                 type=bool, is_flag=True, show_default=True)
 @click.option('--nobench',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, is_flag=True, show_default=True)
+@click.option('--allow_tf32',   help='Can improve training speed at the cost of numerical precision', metavar='BOOL', type=bool, is_flag=True, show_default=True)
 @click.option('--workers',      help='DataLoader worker processes', metavar='INT',              type=click.IntRange(min=1), default=3, show_default=True)
 @click.option('--restart_every',help='Time interval in seconds to restart code', metavar='INT', type=int, default=9999999, show_default=True)
 @click.option('-n','--dry-run', help='Print training options and exit',                         is_flag=True)
@@ -218,7 +227,7 @@ def main(**kwargs):
 
     # Training set.
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
-    c.training_set_kwargs, dataset_name = init_dataset_kwargs(data=opts.data)
+    c.training_set_kwargs, dataset_name = init_dataset_kwargs(data=opts.data, video=opts.video)
     if opts.cond and not c.training_set_kwargs.use_labels:
         raise click.ClickException('--cond=True requires labels specified in dataset.json')
     c.training_set_kwargs.use_labels = opts.cond
@@ -298,6 +307,8 @@ def main(**kwargs):
         c.loss_kwargs.style_mixing_prob = 0 if opts.projected else 0.9
     else:
         c.loss_kwargs.style_mixing_prob = opts.style_mix_p
+    if opts.video:
+        c.loss_kwargs.style_mixing_prob = 0  # video training doesn't work with style mixing
     
     if opts.pl_weight is None: 
         c.loss_kwargs.pl_weight = 0 if opts.projected else 2
@@ -310,9 +321,9 @@ def main(**kwargs):
     if opts.aug != 'noaug':
         if opts.augpipe == 'bg':
             # xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1
-            c.augment_kwargs = dnnlib.EasyDict(class_name='training.augment.AugmentPipe', xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=0, contrast=0, lumaflip=0, hue=0, saturation=0)
+            c.augment_kwargs = dnnlib.EasyDict(class_name='training.augment.ada.AugmentPipe', xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=0, contrast=0, lumaflip=0, hue=0, saturation=0)
         else:
-            c.augment_kwargs = dnnlib.EasyDict(class_name='training.augment.AugmentPipe', xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1, lumaflip=1, hue=1, saturation=1)
+            c.augment_kwargs = dnnlib.EasyDict(class_name='training.augment.ada.AugmentPipe', xflip=1, rotate90=1, xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1, lumaflip=1, hue=1, saturation=1)
         if opts.aug == 'ada':
             c.ada_target = opts.target
         if opts.aug == 'fixed':
@@ -352,6 +363,7 @@ def main(**kwargs):
     if 'stylegan2' in opts.cfg:
         c.G_kwargs.fused_modconv_default = 'inference_only' # Speed up training by using regular convolutions instead of grouped convolutions.
         c.loss_kwargs.pl_no_weight_grad = True # Speed up path length regularization by skipping gradient computation wrt. conv2d weights.
+    c.allow_tf32 = opts.allow_tf32
 
     # Resume.
     if opts.resume is not None:

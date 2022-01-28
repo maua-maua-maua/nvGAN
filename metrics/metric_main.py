@@ -7,13 +7,16 @@ import json
 import os
 import time
 
+import numpy as np
 import torch
 
 import dnnlib
 
-from . import (equivariance, frechet_inception_distance, inception_score,
+from . import (equivariance, frechet_inception_distance,
+               frechet_video_distance, inception_score,
                kernel_inception_distance, metric_utils, perceptual_path_length,
-               precision_recall)
+               precision_recall, repetitiveness_distance,
+               temporal_frechet_inception_distance, video_inception_score)
 
 #----------------------------------------------------------------------------
 
@@ -29,6 +32,12 @@ def is_valid_metric(metric):
 
 def list_valid_metrics():
     return list(_metric_dict.keys())
+
+def is_temporal_metric(metric_name: str):
+    return metric_name in ['fvd2048_16f']
+
+def is_power_of_two(n: int) -> bool:
+    return (n & (n-1) == 0) and n != 0
 
 #----------------------------------------------------------------------------
 
@@ -122,6 +131,90 @@ def eqr50k(opts):
     psnr = equivariance.compute_equivariance_metrics(opts, num_samples=50000, batch_size=4, compute_eqr=True)
     return dict(eqr50k=psnr)
 
+@register_metric
+def is50k(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    mean, std = inception_score.compute_is(opts, num_gen=50000, num_splits=10)
+    return dict(is50k_mean=mean, is50k_std=std)
+
+@register_metric
+def fvd2048_8f(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fvd = frechet_video_distance.compute_fvd(opts, max_real=2048, num_gen=2048, num_frames=8)
+    return dict(fvd2048_8f=fvd)
+
+@register_metric
+def fvd2048_16f(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fvd = frechet_video_distance.compute_fvd(opts, max_real=2048, num_gen=2048, num_frames=16)
+    return dict(fvd2048_16f=fvd)
+
+@register_metric
+def fvd2048_32f(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fvd = frechet_video_distance.compute_fvd(opts, max_real=2048, num_gen=2048, num_frames=32)
+    return dict(fvd2048_32f=fvd)
+
+@register_metric
+def fvd2048_64f(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fvd = frechet_video_distance.compute_fvd(opts, max_real=2048, num_gen=2048, num_frames=64)
+    return dict(fvd2048_64f=fvd)
+
+@register_metric
+def fvd2048_128f(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fvd = frechet_video_distance.compute_fvd(opts, max_real=2048, num_gen=2048, num_frames=128)
+    return dict(fvd2048_128f=fvd)
+
+@register_metric
+def fvd2048_32f_subsample(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fvd = frechet_video_distance.compute_fvd(opts, max_real=2048, num_gen=2048, num_frames=16, subsample_factor=2)
+    return dict(fvd2048_32f_subsample=fvd)
+
+@register_metric
+def fvd2048_64f_subsample(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fvd = frechet_video_distance.compute_fvd(opts, max_real=2048, num_gen=2048, num_frames=16, subsample_factor=4)
+    return dict(fvd2048_64f_subsample=fvd)
+
+@register_metric
+def fvd2048_128f_subsample(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fvd = frechet_video_distance.compute_fvd(opts, max_real=2048, num_gen=2048, num_frames=16, subsample_factor=8)
+    return dict(fvd2048_128f_subsample=fvd)
+
+@register_metric
+def fvd2048_256f_subsample(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fvd = frechet_video_distance.compute_fvd(opts, max_real=2048, num_gen=2048, num_frames=16, subsample_factor=16)
+    return dict(fvd2048_256f_subsample=fvd)
+
+@register_metric
+def tfid512_64f(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fids = temporal_frechet_inception_distance.compute_tfid(opts, max_real=512, num_gen=512, num_frames=64)
+    return dict(tfid_avg=np.mean(fids), **{f'tfid_{i+1}': fid for i, fid in enumerate(fids) if is_power_of_two(i+2)})
+
+@register_metric
+def tfid2048_128f(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    fids = temporal_frechet_inception_distance.compute_tfid(opts, max_real=2048, num_gen=2048, num_frames=128)
+    return dict(tfid_avg=np.mean(fids), **{f'tfid_{i+1}': fid for i, fid in enumerate(fids) if is_power_of_two(i+2)})
+
+@register_metric
+def rd512_128f(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    rd = repetitiveness_distance.compute_rd(opts, max_real=256, num_gen=256)
+    return dict(rd512_128f=rd)
+
+@register_metric
+def isv2048(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
+    mean, std = video_inception_score.compute_isv(opts, num_gen=2048, num_splits=10)
+    return dict(isv2048_mean=mean, isv2048_std=std)
+
 # Legacy metrics.
 
 @register_metric
@@ -143,7 +236,21 @@ def pr50k3(opts):
     return dict(pr50k3_precision=precision, pr50k3_recall=recall)
 
 @register_metric
-def is50k(opts):
-    opts.dataset_kwargs.update(max_size=None, xflip=False)
-    mean, std = inception_score.compute_is(opts, num_gen=50000, num_splits=10)
-    return dict(is50k_mean=mean, is50k_std=std)
+def ppl_zfull(opts):
+    ppl = perceptual_path_length.compute_ppl(opts, num_samples=50000, epsilon=1e-4, space='z', sampling='full', crop=True, batch_size=2)
+    return dict(ppl_zfull=ppl)
+
+@register_metric
+def ppl_wfull(opts):
+    ppl = perceptual_path_length.compute_ppl(opts, num_samples=50000, epsilon=1e-4, space='w', sampling='full', crop=True, batch_size=2)
+    return dict(ppl_wfull=ppl)
+
+@register_metric
+def ppl_zend(opts):
+    ppl = perceptual_path_length.compute_ppl(opts, num_samples=50000, epsilon=1e-4, space='z', sampling='end', crop=True, batch_size=2)
+    return dict(ppl_zend=ppl)
+
+@register_metric
+def ppl_wend(opts):
+    ppl = perceptual_path_length.compute_ppl(opts, num_samples=50000, epsilon=1e-4, space='w', sampling='end', crop=True, batch_size=2)
+    return dict(ppl_wend=ppl)
