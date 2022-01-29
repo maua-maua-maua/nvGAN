@@ -144,7 +144,6 @@ def training_loop(
     __BATCH_IDX__ = torch.tensor(0, dtype=torch.long, device=device)
     __PL_MEAN__ = torch.zeros([], device=device)
     best_fid = 9999
-    projected = "Projected" in loss_kwargs['class_name']
 
     # Load training set.
     if rank == 0:
@@ -198,15 +197,13 @@ def training_loop(
     modules = [G, D, G_ema]
     augment_pipe = None
     ada_stats = None
-
-    if not projected:
-        if rank == 0:
-            print('Setting up augmentation...')
-        if (augment_kwargs is not None) and (augment_p > 0 or ada_target is not None):
-            augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
-            augment_pipe.p.copy_(torch.as_tensor(augment_p))
-            if ada_target is not None:
-                ada_stats = training_stats.Collector(regex='Loss/signs/real')
+    if rank == 0:
+        print('Setting up augmentation...')
+    if (augment_kwargs is not None) and (augment_p > 0 or ada_target is not None):
+        augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
+        augment_pipe.p.copy_(torch.as_tensor(augment_p))
+        if ada_target is not None:
+            ada_stats = training_stats.Collector(regex='Loss/signs/real')
         modules += [augment_pipe]
         loss_kwargs['augment_pipe'] = augment_pipe
 
@@ -378,8 +375,7 @@ def training_loop(
         fields += [f"cpumem {training_stats.report0('Resources/cpu_mem_gb', psutil.Process(os.getpid()).memory_info().rss / 2**30):<6.2f}"]
         fields += [f"gpumem {training_stats.report0('Resources/peak_gpu_mem_gb', torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}"]
         fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}"]
-        if not projected:
-            fields += [f"augment {training_stats.report0('Progress/augment', float(augment_pipe.p.cpu()) if augment_pipe is not None else 0):.3f}"]
+        fields += [f"augment {training_stats.report0('Progress/augment', float(augment_pipe.p.cpu()) if augment_pipe is not None else 0):.3f}"]
         torch.cuda.reset_peak_memory_stats()
         training_stats.report0('Timing/total_hours', (tick_end_time - start_time) / (60 * 60))
         training_stats.report0('Timing/total_days', (tick_end_time - start_time) / (24 * 60 * 60))

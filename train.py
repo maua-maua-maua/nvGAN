@@ -245,7 +245,7 @@ def main(**kwargs):
 
     if opts.projected:
         c.D_kwargs = dnnlib.EasyDict(
-            class_name='networks.projected_discriminator.ProjectedDiscriminator',
+            class_name='networks.projected.discriminator.ProjectedDiscriminator',
             diffaug=True,
             interp224=(c.training_set_kwargs.resolution < 224),
             backbone_kwargs=dnnlib.EasyDict(),
@@ -271,16 +271,14 @@ def main(**kwargs):
 
     if opts.cfg == 'stylegan2':
         c.G_kwargs.class_name = 'networks.stylegan2.Generator'
-        c.G_opt_kwargs.lr = c.D_opt_kwargs.lr = 0.00025 if opts.projected else 0.0002
-        c.D_kwargs.backbone_kwargs.separable = False
+        c.G_opt_kwargs.lr = c.D_opt_kwargs.lr = 0.002
+        c.D_kwargs.backbone_kwargs.separable = True
     elif opts.cfg in ['fastgan', 'fastgan_lite']:
         c.G_kwargs = dnnlib.EasyDict(class_name='networks.fastgan.Generator', cond=opts.cond, synthesis_kwargs=dnnlib.EasyDict())
         c.G_kwargs.synthesis_kwargs.lite = (opts.cfg == 'fastgan_lite')
         c.G_opt_kwargs.lr = c.D_opt_kwargs.lr = 0.0002
-        c.D_kwargs.backbone_kwargs.separable = True
+        c.D_kwargs.backbone_kwargs.separable = False
     else:
-        c.D_kwargs.backbone_kwargs.separable = False  # TODO does stylegan3 want separable or not?
-        c.G_opt_kwargs.lr = c.D_opt_kwargs.lr = 0.00025
         c.G_kwargs.class_name = 'networks.stylegan3.Generator'
         c.G_kwargs.magnitude_ema_beta = 0.5 ** (c.batch_size / (20 * 1e3))
         if opts.cfg == 'stylegan3-r':
@@ -290,6 +288,8 @@ def main(**kwargs):
             c.G_kwargs.use_radial_filters = True # Use radially symmetric downsampling filters.
             c.loss_kwargs.blur_init_sigma = 10 # Blur the images seen by the discriminator.
             c.loss_kwargs.blur_fade_kimg = c.batch_size * 200 / 32 # Fade out the blur during the first N kimg.
+        c.G_opt_kwargs.lr = c.D_opt_kwargs.lr = 0.0025
+        c.D_kwargs.backbone_kwargs.separable = True  # TODO does stylegan3 want separable or not?
 
     if opts.glr is not None:
         c.G_opt_kwargs.lr = opts.glr # Override the default learning rate if specified
@@ -298,8 +298,8 @@ def main(**kwargs):
     c.ema_kimg = c.batch_size * 10 / 32
 
     # Regularization
-    if opts.gamma is None:
-        opts.gamma = 0.0002 * (c.training_set_kwargs.resolution ** 2) / opts.batch
+    if opts.gamma is None: 
+        c.loss_kwargs.r1_gamma = 0 if opts.projected else 0.0002 * (c.training_set_kwargs.resolution ** 2) / opts.batch
     else:
         c.loss_kwargs.r1_gamma = opts.gamma
     
@@ -315,7 +315,7 @@ def main(**kwargs):
     else:
         c.loss_kwargs.pl_weight = opts.pl_weight
 
-    c.G_reg_interval = 4 # Enable lazy regularization for G.
+    c.G_reg_interval = 4  # Enable lazy regularization for G.
 
     # Augmentation.
     if opts.aug != 'noaug':
@@ -355,6 +355,7 @@ def main(**kwargs):
         raise click.ClickException('\n'.join(['--metrics can only contain the following values:'] + metric_main.list_valid_metrics()))
 
     # Performance-related toggles.
+    c.G_kwargs.num_fp16_res = c.D_kwargs.num_fp16_res = 5
     if opts.fp32:
         c.G_kwargs.num_fp16_res = c.D_kwargs.num_fp16_res = 0
         c.G_kwargs.conv_clamp = c.D_kwargs.conv_clamp = None

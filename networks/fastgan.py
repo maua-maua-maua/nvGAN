@@ -4,8 +4,8 @@
 #
 import torch.nn as nn
 
-from .blocks import (InitLayer, SEBlock, UpBlockBig, UpBlockBigCond,
-                     UpBlockSmall, UpBlockSmallCond, conv2d)
+from .projected.layers import (InitLayer, SEBlock, UpBlockBig, UpBlockBigCond,
+                               UpBlockSmall, UpBlockSmallCond, conv2d)
 
 
 def normalize_second_moment(x, dim=1, eps=1e-8):

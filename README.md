@@ -69,7 +69,7 @@ Please refer to [`gen_images.py`](./gen_images.py) for complete code example.
 Our implementation is modular, so it is straightforward to use PG in your own codebase. Simply copy the ```training/networks``` folder to your project.
 Then, to get the projected multi-scale discriminator, run
 ```
-from networks.projected_discriminator import ProjectedDiscriminator
+from networks.projected.discriminator import ProjectedDiscriminator
 D = ProjectedDiscriminator()
 ```
 The only thing you still need to do is to make sure that the feature network is not trained, i.e., explicitly set

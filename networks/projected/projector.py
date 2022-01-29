@@ -2,7 +2,7 @@ import timm
 import torch
 import torch.nn as nn
 
-from .blocks import FeatureFusionBlock
+from .layers import FeatureFusionBlock
 
 
 def _make_scratch_ccm(scratch, in_channels, cout, expand=False):
