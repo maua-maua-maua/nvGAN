@@ -1,4 +1,5 @@
-from typing import Dict
+import math
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -157,13 +158,16 @@ class AlignedTimeEncoder(PeriodicFeatsTimeEncoder):
             return time_embs
 
 
+# ----------------------------------------------------------------------------
+
+
 @persistence.persistent_class
 class MotionEncoder(torch.nn.Module):
     def __init__(self, z_dim, c_dim, w_dim, start_fpm=32, fpm_base=1, kernel_size=11, max_num_frames=1024):
         super().__init__()
         self.z_dim, self.c_dim, self.w_dim = z_dim, c_dim, w_dim
         self.time_encoder = AlignedTimeEncoder(latent_dim=w_dim)
-        self.num_frames_per_motion = [start_fpm * fpm_base]
+        self.num_frames_per_motion = start_fpm * fpm_base
         self.max_num_frames = max_num_frames
 
         video_len_dim = 0
@@ -265,7 +269,7 @@ class MotionEncoder(torch.nn.Module):
 
         batch_size, num_frames = t.shape
         out = {}
-        motion_info = self.generate_motion(c, t, l, self.num_frames_per_motion[0], w=w, motion_noise=motion_noise)
+        motion_info = self.generate_motion(c, t, l, self.num_frames_per_motion, w=w, motion_noise=motion_noise)
         torch.save(motion_info, "/tmp/motion_info.pt")
         motion_z = motion_info["motion_z"].view(t.shape[0] * t.shape[1], -1)  # [batch_size * num_frames, z_dim]
 
@@ -289,3 +293,180 @@ class MotionEncoder(torch.nn.Module):
         out["motion_noise"] = motion_info["motion_noise"]  # (Any shape)
 
         return out
+
+
+
+@persistence.persistent_class
+class TemporalInput(nn.Module):
+    def __init__(
+        self, resolution, channel_dim: int, w_dim: int, motion_w_dim: int, has_const=True, has_variable_input=False
+    ):
+        super().__init__()
+
+        self.motion_w_dim = motion_w_dim
+        self.resolution = resolution
+
+        # Const input
+        if has_const:
+            self.const = nn.Parameter(torch.randn(1, channel_dim, resolution, resolution))
+        else:
+            self.const = None
+
+        # Variable input
+        if has_variable_input:
+            self.repeat = input["var_repeat"]
+            fc_output_dim = channel_dim if self.repeat else channel_dim * resolution ** 2  # [1]
+            self.fc = FullyConnectedLayer(w_dim, fc_output_dim, activation="lrelu")
+        else:
+            self.fc = None
+
+    def get_total_dim(self):
+        total_dim = self.motion_w_dim
+        total_dim += 0 if self.const is None else self.const.shape[1]
+        total_dim += 0 if self.fc is None else self.const.shape[1]
+
+        return total_dim
+
+    def forward(self, t: Tensor, motion_w: Tensor, w: Tensor = None) -> Tensor:
+        """
+        motion_w: [batch_size, motion_w_dim]
+        """
+        out = torch.cat(
+            [
+                self.const.repeat(len(motion_w), 1, 1, 1),
+                motion_w.unsqueeze(2).unsqueeze(3).repeat(1, 1, self.resolution, self.resolution),
+            ],
+            dim=1,
+        )  # [batch_size, channel_dim + num_fourier_feats * 2]
+
+        if not self.fc is None:
+            if self.repeat:
+                res = self.resolution
+                var_part = (
+                    self.fc(w).unsqueeze(2).unsqueeze(3).repeat(1, 1, res, res)
+                )  # [batch_size, channel_dim, h, w]
+            else:
+                var_part = self.fc(w).view(len(w), -1, *out.shape[2:])  # [batch_size, channel_dim, h, w]
+
+            out = torch.cat([out, var_part], dim=1)  # [batch_size, channel_dim + num_fourier_feats * 2]
+
+        return out
+
+
+# ----------------------------------------------------------------------------
+
+
+@persistence.persistent_class
+class GenInput(nn.Module):
+    def __init__(self, channel_dim: int, w_dim: int, motion_w_dim: int = None):
+        super().__init__()
+        self.input = TemporalInput(resolution=4, channel_dim=channel_dim, w_dim=w_dim, motion_w_dim=motion_w_dim)
+        self.total_dim = self.input.get_total_dim()
+
+    def forward(self, w: Tensor = None, t: Optional[Tensor] = None, motion_w: Optional[Tensor] = None) -> Tensor:
+        x = self.input(t, w=w, motion_w=motion_w)  # [batch_size, d, h, w]
+        return x
+
+
+# ----------------------------------------------------------------------------
+
+
+def construct_log_spaced_freqs(max_num_frames: int, skip_small_t_freqs: int = 0) -> Tuple[int, Tensor]:
+    time_resolution = 2 ** np.ceil(np.log2(max_num_frames))
+    num_fourier_feats = np.ceil(np.log2(time_resolution)).astype(int)
+    powers = torch.tensor([2]).repeat(num_fourier_feats).pow(torch.arange(num_fourier_feats))  # [num_fourier_feats]
+    powers = powers[: len(powers) - skip_small_t_freqs]  # [num_fourier_feats]
+    fourier_coefs = powers.unsqueeze(0).float() * np.pi  # [1, num_fourier_feats]
+
+    return fourier_coefs / time_resolution
+
+
+# ----------------------------------------------------------------------------
+
+
+@persistence.persistent_class
+class FixedTimeEncoder(nn.Module):
+    def __init__(
+        self,
+        max_num_frames: int,  # Maximum T size
+        transformer_pe: bool = False,  # Whether we should use positional embeddings from Transformer
+        d_model: int = 512,  # d_model for Transformer PE's
+        skip_small_t_freqs: int = 0,  # How many high frequencies we should skip
+    ):
+        super().__init__()
+
+        assert max_num_frames >= 1, f"Wrong max_num_frames: {max_num_frames}"
+
+        if transformer_pe:
+            assert skip_small_t_freqs == 0, "Cant use `skip_small_t_freqs` with `transformer_pe`"
+            fourier_coefs = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)).unsqueeze(
+                0
+            )  # [1, d_model]
+        else:
+            fourier_coefs = construct_log_spaced_freqs(max_num_frames, skip_small_t_freqs=skip_small_t_freqs)
+
+        self.register_buffer("fourier_coefs", fourier_coefs)  # [1, num_fourier_feats]
+
+    def get_dim(self) -> int:
+        return self.fourier_coefs.shape[1] * 2
+
+    def progressive_update(self, curr_kimg):
+        pass
+
+    def forward(self, t: Tensor) -> Tensor:
+        assert t.ndim == 2, f"Wrong shape: {t.shape}"
+
+        t = t.view(-1).float()  # [batch_size * num_frames]
+        fourier_raw_embs = self.fourier_coefs * t.unsqueeze(1)  # [bf, num_fourier_feats]
+
+        fourier_embs = torch.cat(
+            [
+                fourier_raw_embs.sin(),
+                fourier_raw_embs.cos(),
+            ],
+            dim=1,
+        )  # [bf, num_fourier_feats * 2]
+
+        return fourier_embs
+
+
+# ----------------------------------------------------------------------------
+
+
+class TemporalDifferenceEncoder(nn.Module):
+    def __init__(self, num_frames_per_sample=2, max_num_frames=1024):
+        super().__init__()
+
+        self.num_frames_per_sample = num_frames_per_sample
+
+        if num_frames_per_sample > 1:
+            self.d = 256
+            self.const_embed = nn.Embedding(max_num_frames, self.d)
+            self.time_encoder = FixedTimeEncoder(max_num_frames)
+
+    def get_total_dim(self) -> int:
+        if self.num_frames_per_sample == 1:
+            return 1
+        else:
+            return (self.d + self.time_encoder.get_dim()) * (self.num_frames_per_sample - 1)
+
+    def forward(self, t: Tensor) -> Tensor:
+        misc.assert_shape(t, [None, self.num_frames_per_sample])
+
+        batch_size = t.shape[0]
+
+        if self.num_frames_per_sample == 1:
+            out = torch.zeros(len(t), 1, device=t.device)
+        else:
+            num_diffs_to_use = self.num_frames_per_sample - 1
+            t_diffs = (t[:, 1:] - t[:, :-1]).view(-1)  # [batch_size * (num_frames - 1)]
+            # Note: float => round => long is necessary when it's originally long
+            const_embs = self.const_embed(t_diffs.float().round().long())  # [batch_size * num_diffs_to_use, d]
+            fourier_embs = self.time_encoder(t_diffs.unsqueeze(1))  # [batch_size * num_diffs_to_use, num_fourier_feats]
+            out = torch.cat([const_embs, fourier_embs], dim=1)  # [batch_size * num_diffs_to_use, d + num_fourier_feats]
+            out = out.view(batch_size, num_diffs_to_use, -1).view(
+                batch_size, -1
+            )  # [batch_size, num_diffs_to_use * (d + num_fourier_feats)]
+
+        return out
+

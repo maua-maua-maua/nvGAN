@@ -1,13 +1,12 @@
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
 from torch_utils import misc, persistence
 from torch_utils.ops import bias_act, conv2d_resample, fma, upfirdn2d
 
-from .layers import Conv2dLayer, FullyConnectedLayer, GenInput, MappingNetwork
-from .motion import MotionEncoder
+from .layers import Conv2dLayer, FullyConnectedLayer, MappingNetwork
+from .motion import GenInput, MotionEncoder
 
 # ----------------------------------------------------------------------------
 
@@ -82,74 +81,6 @@ def modulated_conv2d(
     x = x.reshape(batch_size, -1, *x.shape[2:])
     if noise is not None:
         x = x.add_(noise)
-    return x
-
-
-# ----------------------------------------------------------------------------
-
-
-@misc.profiled_function
-def fmm_modulate_linear(x: Tensor, weight: Tensor, styles: Tensor, noise=None, activation: str = "demod") -> Tensor:
-    """
-    x: [batch_size, c_in, height, width]
-    weight: [c_out, c_in, 1, 1]
-    style: [batch_size, num_mod_params]
-    noise: Optional[batch_size, 1, height, width]
-    """
-    batch_size, c_in, h, w = x.shape
-    c_out, c_in, kh, kw = weight.shape
-    rank = styles.shape[1] // (c_in + c_out)
-
-    assert kh == 1 and kw == 1
-    assert styles.shape[1] % (c_in + c_out) == 0
-
-    # Now, we need to construct a [c_out, c_in] matrix
-    left_matrix = styles[:, : c_out * rank]  # [batch_size, left_matrix_size]
-    right_matrix = styles[:, c_out * rank :]  # [batch_size, right_matrix_size]
-
-    left_matrix = left_matrix.view(batch_size, c_out, rank)  # [batch_size, c_out, rank]
-    right_matrix = right_matrix.view(batch_size, rank, c_in)  # [batch_size, rank, c_in]
-
-    # Imagine, that the output of `self.affine` (in SynthesisLayer) is N(0, 1)
-    # Then, std of weights is sqrt(rank). Converting it back to N(0, 1)
-    modulation = left_matrix @ right_matrix / np.sqrt(rank)  # [batch_size, c_out, c_in]
-
-    if activation == "tanh":
-        modulation = modulation.tanh()
-    elif activation == "sigmoid":
-        modulation = modulation.sigmoid() - 0.5
-
-    W = weight.squeeze(3).squeeze(2).unsqueeze(0) * (modulation + 1.0)  # [batch_size, c_out, c_in]
-    if activation == "demod":
-        W = W / (W.norm(dim=2, keepdim=True) + 1e-8)  # [batch_size, c_out, c_in]
-    W = W.to(dtype=x.dtype)
-
-    # out = torch.einsum('boi,bihw->bohw', W, x)
-    x = x.view(batch_size, c_in, h * w)  # [batch_size, c_in, h * w]
-    out = torch.bmm(W, x)  # [batch_size, c_out, h * w]
-    out = out.view(batch_size, c_out, h, w)  # [batch_size, c_out, h, w]
-
-    if not noise is None:
-        out = out.add_(noise)
-
-    return out
-
-
-# ----------------------------------------------------------------------------
-
-
-@misc.profiled_function
-def maybe_upsample(x, upsampling_mode: str, up: int) -> Tensor:
-    if up == 1:
-        return x
-
-    if upsampling_mode == "bilinear":
-        x = F.interpolate(x, mode="bilinear", align_corners=True, scale_factor=up)
-    elif upsampling_mode == "nearest":
-        x = F.interpolate(x, mode="nearest", scale_factor=up)
-    else:
-        raise NotImplementedError(f"Unknown upsampling mode: {upsampling_mode}")
-
     return x
 
 
@@ -274,6 +205,7 @@ class SynthesisBlock(torch.nn.Module):
         conv_clamp=None,  # Clamp the output of convolution layers to +-X, None = disable clamping.
         use_fp16=False,  # Use FP16 for this block?
         fp16_channels_last=False,  # Use channels-last memory format with FP16?
+        input_resolution=4,
         **layer_kwargs,  # Arguments for SynthesisLayer.
     ):
         assert architecture in ["orig", "skip", "resnet"]
@@ -282,10 +214,10 @@ class SynthesisBlock(torch.nn.Module):
         self.in_channels = in_channels
         self.w_dim = w_dim
 
-        if resolution <= input.resolution:
-            self.resolution = input.resolution
+        if resolution <= input_resolution:
+            self.resolution = input_resolution
             self.up = 1
-            self.input_resolution = input.resolution
+            self.input_resolution = input_resolution
         else:
             self.resolution = resolution
             self.up = 2
@@ -372,9 +304,7 @@ class SynthesisBlock(torch.nn.Module):
         # Input.
         if self.in_channels == 0:
             conv1_w = next(w_iter)
-            x = self.input(
-                ws.shape[0], conv1_w, t=t, motion_w=motion_w, device=ws.device, dtype=dtype, memory_format=memory_format
-            )
+            x = self.input(conv1_w, t=t, motion_w=motion_w)
         else:
             misc.assert_shape(x, [None, self.in_channels, self.input_resolution, self.input_resolution])
             x = x.to(dtype=dtype, memory_format=memory_format)
@@ -438,12 +368,8 @@ class SynthesisNetwork(torch.nn.Module):
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
 
-        if w_dim > 0:
-            self.motion_encoder = MotionEncoder(z_dim, c_dim, w_dim)
-            self.motion_w_dim = self.motion_encoder.get_output_dim()
-        else:
-            self.motion_encoder = None
-            self.motion_w_dim = 0
+        self.motion_encoder = MotionEncoder(z_dim, c_dim, w_dim)
+        self.motion_w_dim = self.motion_encoder.get_output_dim()
 
         self.num_ws = 0
         for res in self.block_resolutions:
@@ -475,17 +401,11 @@ class SynthesisNetwork(torch.nn.Module):
         misc.assert_shape(ws, [None, self.num_ws, self.w_dim])
         block_ws = []
 
-        if self.motion_encoder is None:
-            ws = ws.repeat_interleave(t.shape[1], dim=0)  # [batch_size * num_frames, num_ws, w_dim]
-            motion_w = None
-        else:
-            if motion_w is None:
-                motion_info = self.motion_encoder(
-                    c, t, l=l, w=ws[:, 0], motion_noise=motion_noise
-                )  # [batch_size * num_frames, motion_w_dim]
-                motion_w = motion_info["motion_w"]  # [batch_size * num_frames, motion_w_dim]
+        if motion_w is None:
+            motion_info = self.motion_encoder(c, t, l=l, w=ws[:, 0], motion_noise=motion_noise)  # [batch_size * num_frames, motion_w_dim]
+            motion_w = motion_info["motion_w"]  # [batch_size * num_frames, motion_w_dim]
 
-            ws = ws.repeat_interleave(t.shape[1], dim=0)  # [batch_size * num_frames, num_ws, w_dim]
+        ws = ws.repeat_interleave(t.shape[1], dim=0)  # [batch_size * num_frames, num_ws, w_dim]
 
         with torch.autograd.profiler.record_function("split_ws"):
             ws = ws.to(torch.float32)
@@ -514,7 +434,7 @@ class Generator(torch.nn.Module):
         img_resolution,  # Output resolution.
         img_channels,  # Number of output color channels.
         mapping_kwargs={},  # Arguments for MappingNetwork.
-        synthesis_kwargs={},  # Arguments for SynthesisNetwork.
+        **synthesis_kwargs,  # Arguments for SynthesisNetwork.
     ):
         super().__init__()
 
@@ -522,7 +442,7 @@ class Generator(torch.nn.Module):
             "fps": 24,
             "max_num_frames": 1024,
             "type": "random",
-            "total_dists": [1, 2, 4, 8, 16, 32],
+            "dists": [1, 2, 4, 8, 16, 32],
             "num_frames_per_sample": 2,
         }
         self.z_dim = z_dim
@@ -545,9 +465,7 @@ class Generator(torch.nn.Module):
         assert len(z) == len(c) == len(t), f"Wrong shape: {z.shape}, {c.shape}, {t.shape}"
         assert t.ndim == 2, f"Wrong shape: {t.shape}"
 
-        ws = self.mapping(
-            z, c, l=l, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff
-        )  # [batch_size, num_ws, w_dim]
+        ws = self.mapping(z, c, l=l, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)  # [batch_size, num_ws, w_dim]
         img = self.synthesis(ws, t=t, c=c, l=l, **synthesis_kwargs)  # [batch_size * num_frames, c, h, w]
 
         return img

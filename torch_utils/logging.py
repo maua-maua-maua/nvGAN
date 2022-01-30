@@ -7,7 +7,6 @@ import numpy as np
 import torch
 import torchvision.transforms.functional as TVF
 from PIL import Image
-from src.training.layers import generate_coords
 from torch import Tensor
 from torchvision import utils
 from tqdm import tqdm
@@ -131,32 +130,6 @@ def save_jpg_mp_proxy(args):
 
 def save_jpg(x: np.ndarray, save_path: os.PathLike):
     Image.fromarray(x).save(save_path, q=95)
-
-
-@torch.no_grad()
-def convert_optical_flow_to_imgs(optical_flow: Tensor, tmp_dir, verbose: bool=False) -> List[Image.Image]:
-    assert optical_flow.ndim == 4, f"Wrong shape: {optical_flow.shape}"
-    assert optical_flow.shape[3] == 2, f"Wrong shape: {optical_flow.shape}"
-    os.makedirs(tmp_dir, exist_ok=True) # To dump dummy images to
-
-    img_size = optical_flow.shape[1]
-    X, Y = generate_coords(1, img_size, align_corners=True)[0] # [2, h, w]
-
-    imgs = []
-    iters = tqdm(optical_flow, desc='Converting optical flow to imgs') if verbose else optical_flow
-
-    for flow in iters:
-        U, V = flow.permute(2, 0, 1).cpu()
-        fig = plt.figure(figsize=(5, 5))
-        plt.quiver(X.numpy(), Y.numpy(), U.numpy(), V.numpy(), angles='xy', scale_units='xy', scale=1)
-        plt.tight_layout()
-        plt.show()
-        plt.savefig(os.path.join(tmp_dir, 'remove_me.jpg')) # Does not render without this...
-        plt.close() # Render and close
-        img = Image.fromarray(np.asarray(fig.canvas.buffer_rgba()))
-        imgs.append(rgba_to_rgb(img))
-
-    return imgs
 
 
 def rgba_to_rgb(image, color=(255, 255, 255)):

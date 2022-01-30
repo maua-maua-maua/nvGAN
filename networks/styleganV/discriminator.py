@@ -1,14 +1,11 @@
 import numpy as np
 import torch
-import torch.nn.functional as F
-from torch import Tensor
 
 from torch_utils import misc, persistence
 from torch_utils.ops import upfirdn2d
 
-from .generator import SynthesisLayer
-from .layers import (Conv2dLayer, FullyConnectedLayer, MappingNetwork,
-                     TemporalDifferenceEncoder, remove_diag)
+from .layers import Conv2dLayer, FullyConnectedLayer, MappingNetwork
+from .motion import TemporalDifferenceEncoder
 
 
 @persistence.persistent_class
@@ -29,9 +26,6 @@ class DiscriminatorBlock(torch.nn.Module):
         fp16_channels_last=False,  # Use channels-last memory format with FP16?
         freeze_layers=0,  # Freeze-D: Number of layers to freeze.
         c_dim=0,  # Embedding size for t.
-        agg_concat_res=16,
-        num_frames_per_sample=2,
-        contr_resolutions=[],
     ):
         assert architecture in ["orig", "skip", "resnet"]
         super().__init__()
@@ -78,25 +72,8 @@ class DiscriminatorBlock(torch.nn.Module):
             channels_last=self.channels_last,
         )
 
-        if int(self.resolution) in [int(r) for r in contr_resolutions] and num_frames_per_sample > 1:
-            assert (
-                agg_concat_res < self.resolution
-            ), f"Cant compute similarities after concatenation: {agg_concat_res} > {self.resolution}"
-            self.contr = GroupwiseContrastiveLayer(
-                in_channels=conv0_in_channels,
-                c_dim=c_dim,
-                resolution=self.resolution,
-                conv_clamp=conv_clamp,
-                channels_last=self.channels_last,
-                num_frames_per_sample=num_frames_per_sample,
-            )
-            conv1_in_channels = self.contr.get_output_dim()
-        else:
-            self.contr = None
-            conv1_in_channels = tmp_channels
-
         self.conv1 = Conv2dLayer(
-            conv1_in_channels,
+            tmp_channels,
             out_channels,
             kernel_size=3,
             activation=activation,
@@ -140,12 +117,10 @@ class DiscriminatorBlock(torch.nn.Module):
         if self.architecture == "resnet":
             y = self.skip(x, gain=np.sqrt(0.5))
             x = self.conv0(x)
-            x = x if self.contr is None else self.contr(x, c)
             x = self.conv1(x, gain=np.sqrt(0.5))
             x = y.add_(x)
         else:
             x = self.conv0(x)
-            x = x if self.contr is None else self.contr(x, c)
             x = self.conv1(x)
 
         assert x.dtype == dtype
@@ -180,140 +155,6 @@ class MinibatchStdLayer(torch.nn.Module):
         y = y.repeat(G, 1, H, W)  # [NFHW]   Replicate over group and pixels.
         x = torch.cat([x, y], dim=1)  # [N(C+1)HW]   Append to input as new channels.
         return x
-
-
-# ----------------------------------------------------------------------------
-
-
-@persistence.persistent_class
-class GroupwiseContrastiveLayer(torch.nn.Module):
-    """
-    This layer compares images of the same video with one another
-    and concatenates the similarity scores back to their original activations
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        resolution: int,
-        c_dim: int,
-        conv_clamp: int = None,
-        channels_last: bool = False,
-        num_frames_per_sample=2,
-        dim=256,
-        diff_based=True,
-        kernel_size=3,
-    ):
-        super().__init__()
-
-        self.in_channels = in_channels
-        self.group_size = num_frames_per_sample
-        self.dim = dim
-        self.scale = 1 if self.dim <= 3 else ((self.dim - 2) ** 2 / self.dim) ** 0.5
-        self.diff_based = diff_based
-
-        self.transform = SynthesisLayer(
-            in_channels=in_channels,
-            out_channels=dim,
-            w_dim=c_dim,
-            resolution=resolution,
-            kernel_size=kernel_size,
-            activation="lrelu",
-            conv_clamp=conv_clamp,
-            channels_last=channels_last,
-        )
-
-    def get_output_dim(self) -> int:
-        if self.diff_based:
-            return self.in_channels + (self.group_size - 1) * (self.group_size - 2)
-        else:
-            return self.in_channels + self.group_size - 1
-
-    def forward(self, x: Tensor, c: Tensor) -> Tensor:
-        bn, c_in, h, w = x.shape
-        num_groups = bn // self.group_size
-        y = self.transform(x, c)  # [bn, dim, h, w]
-        y = y.reshape(num_groups, self.group_size, self.dim, h, w)  # [num_groups, group_size, dim, h, w]
-
-        if self.diff_based:
-            # We first compute differences between frames features
-            # and then we compute similarities between those vectors
-            # This should show D how the pixels moved
-            d = y[:, 1:] - y[:, :-1]  # [num_groups, group_size - 1, dim, h, w]
-            # Unfortunately, we cannot normalize the diffs because R1 penalty falls with NaNs...
-            # So, normalize the scale at least somehow...
-            d_sims = (
-                (1.0 / np.sqrt(d.shape[2])) * d.permute(0, 3, 4, 1, 2) @ d.permute(0, 3, 4, 2, 1)
-            )  # [num_groups, h, w, group_size - 1, group_size - 1]
-            assert not torch.isnan(d_sims).any(), "There are NaNs in the diffs tensor"
-            d_sims = remove_diag(d_sims)  # [num_groups, h, w, group_size - 1, group_size - 2]
-            y = d_sims.unsqueeze(1).repeat(
-                1, self.group_size, 1, 1, 1, 1
-            )  # [num_groups, group_size, h, w, group_size - 1, group_size - 2]
-            y = y.view(bn, h, w, (self.group_size - 1) * (self.group_size - 2)).permute(
-                0, 3, 1, 2
-            )  # [bn, (group_size - 1) * (group_size - 2), h, w]
-        else:
-            y = F.normalize(y, dim=2)  # [num_groups, group_size, dim, h, w]
-            y = y.permute(0, 3, 4, 1, 2) @ y.permute(0, 3, 4, 2, 1)  # [num_groups, h, w, group_size, group_size]
-            y = y * self.scale  # [num_groups, h, w, group_size, group_size]
-            y = remove_diag(y)  # [num_groups, h, w, group_size, group_size - 1]
-            y = y.permute(0, 3, 4, 1, 2)  # [num_groups, group_size, group_size - 1, h, w]
-            y = y.reshape(bn, self.group_size - 1, h, w)  # [bn, group_size - 1, h, w]
-
-        y = torch.cat([x, y], dim=1)  # [bn, in_channel + d, h, w]
-
-        return y
-
-
-# ----------------------------------------------------------------------------
-
-
-@persistence.persistent_class
-class FeatDiffLayer(torch.nn.Module):
-    """
-    Computes differences between consecutive frames features
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        dim: int,
-        resolution: int,
-        c_dim: int,
-        conv_clamp: int = None,
-        channels_last: bool = False,
-        num_frames_per_sample=2,
-    ):
-        super().__init__()
-
-        self.in_channels = in_channels
-        self.group_size = num_frames_per_sample
-        self.dim = dim
-
-        self.transform = SynthesisLayer(
-            in_channels=in_channels,
-            out_channels=self.dim,
-            w_dim=c_dim,
-            resolution=resolution,
-            kernel_size=3,
-            activation="lrelu",
-            conv_clamp=conv_clamp,
-            channels_last=channels_last,
-        )
-
-    def get_output_dim(self) -> int:
-        return (self.group_size - 1) * self.dim
-
-    def forward(self, x: Tensor, c: Tensor) -> Tensor:
-        bn, c_in, h, w = x.shape
-        num_groups = bn // self.group_size
-        y = self.transform(x, c)  # [bn, dim, h, w]
-        y = y.reshape(num_groups, self.group_size, self.dim, h, w)  # [num_groups, group_size, dim, h, w]
-        d = y[:, 1:] - y[:, :-1]  # [num_groups, group_size - 1, dim, h, w]
-        d = d.view(num_groups, (self.group_size - 1) * self.dim, h, w)  # [num_groups, (group_size - 1) * c, h, w]
-
-        return d
 
 
 # ----------------------------------------------------------------------------
@@ -432,22 +273,12 @@ class Discriminator(torch.nn.Module):
 
         self.time_encoder = TemporalDifferenceEncoder()
 
-        if self.c_dim == 0 and self.time_encoder is None:
-            cmap_dim = 0
-
         common_kwargs = dict(img_channels=img_channels, architecture=architecture, conv_clamp=conv_clamp)
-        conditioning_dim = c_dim + (0 if self.time_encoder is None else self.time_encoder.get_total_dim())
+        conditioning_dim = c_dim + self.time_encoder.get_total_dim()
         cur_layer_idx = 0
 
         num_frames_div_factor = 2
-        self.diff_transform = FeatDiffLayer(
-            in_channels=channels_dict[agg_concat_res] // num_frames_div_factor,
-            dim=0,
-            resolution=agg_concat_res,
-            c_dim=conditioning_dim,
-            conv_clamp=conv_clamp,
-            num_frames_per_sample=num_frames_per_sample,
-        )
+        self.diff_transform = None
 
         for res in self.block_resolutions:
             in_channels = channels_dict[res] if res < img_resolution else 0
@@ -471,7 +302,6 @@ class Discriminator(torch.nn.Module):
                 first_layer_idx=cur_layer_idx,
                 use_fp16=use_fp16,
                 c_dim=conditioning_dim,
-                agg_concat_res=agg_concat_res,
                 **block_kwargs,
                 **common_kwargs,
             )
@@ -492,31 +322,22 @@ class Discriminator(torch.nn.Module):
         assert len(img) == t.shape[0] * t.shape[1], f"Wrong shape: {img.shape}, {t.shape}"
         assert t.ndim == 2, f"Wrong shape: {t.shape}"
 
-        if not self.time_encoder is None:
-            t_embs = self.time_encoder(t.view(-1, self.num_frames_per_sample))  # [batch_size, t_dim]
-            c_orig = torch.cat([c, t_embs], dim=1)  # [batch_size, c_dim + t_dim]
-            c = c_orig.repeat_interleave(t.shape[1], dim=0)  # [batch_size * num_frames, c_dim + t_dim]
+        t_embs = self.time_encoder(t.view(-1, self.num_frames_per_sample))  # [batch_size, t_dim]
+        c_orig = torch.cat([c, t_embs], dim=1)  # [batch_size, c_dim + t_dim]
+        c = c_orig.repeat_interleave(t.shape[1], dim=0)  # [batch_size * num_frames, c_dim + t_dim]
 
         x = None
         for res in self.block_resolutions:
             block = getattr(self, f"b{res}")
             if res == self.agg_concat_res:
-                d = (
-                    None if self.diff_transform is None else self.diff_transform(x, c)
-                )  # [batch_size, num_frames - 1, diff_c, h, w]
                 x = x.view(-1, self.num_frames_per_sample, *x.shape[1:])  # [batch_size, num_frames, c, h, w]
                 x = x.view(x.shape[0], -1, *x.shape[3:])  # [batch_size, num_frames * c, h, w]
-                x = (
-                    x if self.diff_transform is None else torch.cat([x, d], dim=1)
-                )  # [batch_size, num_frames * c + (num_frames - 1) * d_dim, h, w]
                 c = c_orig
             x, img = block(x, img, c, **block_kwargs)
 
         cmap = None
-        if self.c_dim > 0 or not self.time_encoder is None:
-            assert c.shape[1] > 0
-        if c.shape[1] > 0:
-            cmap = self.mapping(None, c)
+        assert c.shape[1] > 0
+        cmap = self.mapping(None, c)
         x, dist_preds = self.b4(x, img, cmap)
         x = x.squeeze(1)  # [batch_size]
 

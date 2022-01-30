@@ -12,22 +12,22 @@ import os
 import pickle
 import random
 import time
+from pathlib import Path
 
 import numpy as np
 import PIL.Image
 import psutil
-import src.legacy
 import torch
 import torchvision
-from omegaconf import OmegaConf
-from src import dnnlib
-from src.metrics import metric_main
-from src.torch_utils import misc, training_stats
-from src.torch_utils.ops import conv2d_gradfix, grid_sample_gradfix
-from src.training.layers import sample_frames
-from src.training.logging import generate_videos, save_video_frames_as_mp4
-from torch.utils.tensorboard import \
-    SummaryWriter  # Note: importing torchvision BEFORE tensorboard results in SIGSEGV
+from torch.utils.tensorboard import SummaryWriter
+
+import dnnlib
+import legacy
+from metrics import metric_main
+from torch_utils import misc, training_stats
+from torch_utils.logging import generate_videos
+from torch_utils.ops import conv2d_gradfix, grid_sample_gradfix
+from training.dataset.video import sample_frames
 
 #----------------------------------------------------------------------------
 
@@ -95,7 +95,6 @@ def save_image_grid(img, fname, drange, grid_size):
 #----------------------------------------------------------------------------
 
 def training_loop(
-    cfg                     = {},       # Main config we use.
     run_dir                 = '.',      # Output directory.
     training_set_kwargs     = {},       # Options for training set.
     data_loader_kwargs      = {},       # Options for torch.utils.data.DataLoader.
@@ -112,26 +111,28 @@ def training_loop(
     batch_size              = 4,        # Total batch size for one training iteration. Can be larger than batch_gpu * num_gpus.
     batch_gpu               = 4,        # Number of samples processed at a time by one GPU.
     ema_kimg                = 10,       # Half-life of the exponential moving average (EMA) of generator weights.
-    ema_rampup              = None,     # EMA ramp-up coefficient.
-    G_reg_interval          = 4,        # How often to perform regularization for G? None = disable lazy regularization.
+    ema_rampup              = 0.05,     # EMA ramp-up coefficient. None = no rampup.
+    G_reg_interval          = None,     # How often to perform regularization for G? None = disable lazy regularization.
     D_reg_interval          = 16,       # How often to perform regularization for D? None = disable lazy regularization.
     augment_p               = 0,        # Initial value of augmentation probability.
     ada_target              = None,     # ADA target value. None = fixed p.
     ada_interval            = 4,        # How often to perform ADA adjustment?
     ada_kimg                = 500,      # ADA adjustment speed, measured in how many kimg it takes for p to increase/decrease by one unit.
     total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.
-    kimg_per_tick           = 5,        # Progress snapshot interval.
-    image_snapshot_ticks    = 50,       # How often to save image snapshots? None = disable.
-    network_snapshot_ticks  = 50,       # How often to save network snapshots? None = disable.
+    kimg_per_tick           = 4,        # Progress snapshot interval.
+    image_snapshot_ticks    = 1,        # How often to save image snapshots? None = disable.
+    network_snapshot_ticks  = 25,       # How often to save network snapshots? None = disable.
     resume_pkl              = None,     # Network pickle to resume training from.
-    resume_whole_state      = False,    # Should we resume the whole state or only the G/D/G_ema checkpoints?
+    resume_kimg             = 0,        # First kimg to report when resuming training.
     cudnn_benchmark         = True,     # Enable torch.backends.cudnn.benchmark?
-    allow_tf32              = False,    # Enable torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32?
+    allow_tf32              = False,    # Enable tf32?
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
+    restart_every           = -1,       # Time interval in seconds to exit code
 ):
+
     # Initialize.
-    experiment_name = os.path.basename(os.path.dirname(run_dir))
+    experiment_name = Path(run_dir).stem
     start_time = time.time()
     device = torch.device('cuda', rank)
     random.seed(random_seed * num_gpus + rank)
@@ -162,8 +163,6 @@ def training_loop(
     common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=training_set.resolution, img_channels=training_set.num_channels)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
-    if cfg.model.generator.time_enc.get('growth_kimg', 0) > 0:
-        G.synthesis.motion_encoder.progressive_update(0.0)
     G_ema = copy.deepcopy(G).eval()
 
     # Resume from existing pickle.
@@ -171,7 +170,7 @@ def training_loop(
         if rank == 0:
             print(f'Resuming from "{resume_pkl}"')
         with dnnlib.util.open_url(resume_pkl) as f:
-            resume_data = src.legacy.load_network_pkl(f)
+            resume_data = legacy.load_network_pkl(f)
 
         if rank == 0:
             for name, module in [('G', G), ('D', D), ('G_ema', G_ema)]:
@@ -179,19 +178,19 @@ def training_loop(
     else:
         resume_data = None
 
-    cur_nimg = 0 if not resume_whole_state else resume_data['stats']['cur_nimg']
-    cur_tick = 0 if not resume_whole_state else resume_data['stats']['cur_tick']
-    batch_idx = 0 if not resume_whole_state else resume_data['stats']['batch_idx']
+    cur_nimg = 0 if not resume_kimg else resume_data['stats']['cur_nimg']
+    cur_tick = 0 if not resume_kimg else resume_data['stats']['cur_tick']
+    batch_idx = 0 if not resume_kimg else resume_data['stats']['batch_idx']
     tick_start_nimg = cur_nimg
 
     # Print network summary tables.
-    if rank == 0 and not resume_whole_state:
+    if rank == 0 and not resume_kimg:
         z = torch.empty([batch_gpu, G.z_dim], device=device) # [bf, z_dim]
         c = torch.empty([batch_gpu, G.c_dim], device=device) # [b, c_dim]
-        t = torch.zeros([batch_gpu, cfg.sampling.num_frames_per_sample], device=device).long() # [b, f]
+        t = torch.zeros([batch_gpu, G.sampling_dict['num_frames_per_sample']], device=device).long() # [b, f]
         l = torch.zeros([batch_gpu], device=device).float() # [bf]
-        img = misc.print_module_summary(G, [z, c, t, l]) # [bf, c, h, w]
-        misc.print_module_summary(D, [img, c, t])
+        img = misc.print_module_summary(G, dict(z=z, c=c, t=t, l=l)) # [bf, c, h, w]
+        misc.print_module_summary(D, dict(img=img, c=c, t=t))
 
     # Setup augmentation.
     if rank == 0:
@@ -206,7 +205,7 @@ def training_loop(
         else:
             ada_stats = None
 
-        if resume_whole_state:
+        if resume_kimg:
             misc.copy_params_and_buffers(resume_data['augment_pipe'], augment_pipe, require_all=False)
     else:
         augment_pipe = None
@@ -215,6 +214,7 @@ def training_loop(
     # Distribute across GPUs.
     if rank == 0:
         print(f'Distributing across {num_gpus} GPUs...')
+        background_process = torch.multiprocessing.Pool(1)
     ddp_modules = dict()
     modules = [
         ('G_mapping', G.mapping),
@@ -223,9 +223,6 @@ def training_loop(
         (None, G_ema),
         ('augment_pipe', augment_pipe),
     ]
-    if cfg.model.loss_kwargs.motion_reg.coef > 0.0:
-        modules.append(('G_motion_encoder', G.synthesis.motion_encoder))
-
     for name, module in modules:
         if (num_gpus > 1) and (module is not None) and len(list(module.parameters())) != 0:
             module.requires_grad_(True)
@@ -237,7 +234,7 @@ def training_loop(
     # Setup training phases.
     if rank == 0:
         print('Setting up training phases...')
-    loss = dnnlib.util.construct_class_by_name(device=device, **ddp_modules, **loss_kwargs) # subclass of training.loss.Loss
+    loss = dnnlib.util.construct_class_by_name(**loss_kwargs, **ddp_modules, device=device) # subclass of training.loss.Loss
     phases = []
     for name, module, opt_kwargs, reg_interval in [('G', G, G_opt_kwargs, G_reg_interval), ('D', D, D_opt_kwargs, D_reg_interval)]:
         if reg_interval is None:
@@ -268,13 +265,13 @@ def training_loop(
     G_opt = next(p.opt for p in phases if p.name in {'Gboth', 'Gmain', 'Greg'})
     D_opt = next(p.opt for p in phases if p.name in {'Dboth', 'Dmain', 'Dreg'})
 
-    if resume_whole_state:
+    if resume_kimg:
         G_opt.load_state_dict(resume_data['G_opt'].state_dict())
         D_opt.load_state_dict(resume_data['D_opt'].state_dict())
 
     # Export sample images.
     if rank == 0:
-        if not resume_whole_state:
+        if not resume_kimg:
             vis = dnnlib.EasyDict(num_videos={128: 36, 256: 25, 512: 9, 1024: 1}[training_set.resolution])
             print('Exporting sample images...')
             vis.grid_size, images, vis.labels, vis.frames_idx, vis.video_lens = setup_snapshot_image_grid(training_set=training_set)
@@ -314,9 +311,6 @@ def training_loop(
         stats_jsonl = open(os.path.join(run_dir, 'stats.jsonl'), 'wt')
         try:
             stats_tfevents = SummaryWriter(run_dir)
-            if not resume_whole_state:
-                config_yaml = OmegaConf.to_yaml(cfg)
-                stats_tfevents.add_text(f'config', text_to_markdown(config_yaml), global_step=0, walltime=time.time())
         except ImportError as err:
             print('Skipping tfevents export:', err)
 
@@ -328,9 +322,6 @@ def training_loop(
     maintenance_time = tick_start_time - start_time
     if progress_fn is not None:
         progress_fn(cur_nimg, total_kimg)
-
-    # Convert to bool since hydra has a very slow access time...
-    use_fractional_t_for_G = bool(cfg.model.generator.motion.use_fractional_t)
 
     while True:
         # Fetch training data.
@@ -349,11 +340,8 @@ def training_loop(
             all_gen_c = [phase_gen_c.split(batch_gpu) for phase_gen_c in all_gen_c.split(batch_size)]
 
             all_gen_l = [training_set.get_video_len(i) for i in gen_cond_sample_idx]
-            if cfg.model.generator.motion.long_history:
-                sample_frames_kwargs = [dict(total_video_len=G.sampling_dict['max_num_frames'], max_time_diff=l) for l in all_gen_l]
-            else:
-                sample_frames_kwargs = [dict(total_video_len=l) for l in all_gen_l]
-            all_gen_t = [sample_frames(G.sampling_dict, use_fractional_t=use_fractional_t_for_G, **kwargs) for kwargs in sample_frames_kwargs]
+            sample_frames_kwargs = [dict(total_video_len=G.sampling_dict['max_num_frames'], max_time_diff=l) for l in all_gen_l]
+            all_gen_t = [sample_frames(**G.sampling_dict, use_fractional_t=True, **kwargs) for kwargs in sample_frames_kwargs]
             all_gen_t = torch.from_numpy(np.stack(all_gen_t)).pin_memory().to(device)
             all_gen_t = [phase_gen_t.split(batch_gpu) for phase_gen_t in all_gen_t.split(batch_size)]
 
@@ -414,7 +402,7 @@ def training_loop(
                 b_ema.copy_(b)
 
         # Update state.
-        cur_nimg += batch_size * cfg.sampling.num_frames_per_sample
+        cur_nimg += batch_size * G.sampling_dict['num_frames_per_sample']
         batch_idx += 1
 
         # Execute ADA heuristic.
@@ -427,9 +415,6 @@ def training_loop(
         done = (cur_nimg >= total_kimg * 1000)
         if (not done) and (cur_tick != 0) and (cur_nimg < tick_start_nimg + kimg_per_tick * 1000):
             continue
-
-        if cfg.model.generator.time_enc.get('growth_kimg', 0) > 0:
-            G.synthesis.motion_encoder.progressive_update(cur_nimg / 1000)
 
         # Print status line, accumulating the same information in stats_collector.
         tick_end_time = time.time()
@@ -457,14 +442,14 @@ def training_loop(
                 print('Aborting...')
 
         # Save image snapshot.
-        if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-            images = torch.cat([G_ema(z=z, c=c, t=t[:, [0]], l=l, noise_mode='const').cpu() for z, c, t, l in zip(vis.grid_z, vis.grid_c, vis.grid_t, vis.grid_l)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=vis.grid_size)
+        if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):                
+            with torch.inference_mode():
+                images = torch.cat([G_ema(z=z, c=c, t=t[:, [0]], l=l, noise_mode='const').cpu() for z, c, t, l in zip(vis.grid_z, vis.grid_c, vis.grid_t, vis.grid_l)]).numpy()
+                save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=vis.grid_size)
 
-            # Saving videos
-            videos_diff_motion = generate_videos(G_ema, vis.vgrid_z, vis.vgrid_c, vis.ts, vis.vgrid_l, as_grids=True) # [video_len, 3, h, w]
-            if not G_ema.synthesis.motion_encoder is None:
-                with torch.no_grad():
+                # Saving videos
+                videos_diff_motion = generate_videos(G_ema, vis.vgrid_z, vis.vgrid_c, vis.ts, vis.vgrid_l, as_grids=True) # [video_len, 3, h, w]
+                if not G_ema.synthesis.motion_encoder is None:
                     motion_noise = G_ema.synthesis.motion_encoder(
                         c=vis.vgrid_c[[0]],
                         t=vis.ts[[0]],
@@ -473,22 +458,23 @@ def training_loop(
                     motion_noise = motion_noise.repeat_interleave(len(vis.ts), dim=0) # [batch_size, *motion_dims]
                     videos_same_motion = generate_videos(G_ema, vis.vgrid_z, vis.vgrid_c, vis.ts, vis.vgrid_l, motion_noise=motion_noise, as_grids=True) # [video_len, 3, h, w]
 
-                assert videos_diff_motion.shape == videos_same_motion.shape, f"Wrong shape: {videos_diff_motion.shape} != {videos_same_motion.shape}"
+                    assert videos_diff_motion.shape == videos_same_motion.shape, f"Wrong shape: {videos_diff_motion.shape} != {videos_same_motion.shape}"
 
-                pad_size = 64
-                videos_to_save = torch.cat([
-                    videos_diff_motion,
-                    torch.ones_like(videos_diff_motion[:, :, :, :pad_size]), # Some padding between the videos
-                    videos_same_motion,
-                ], dim=3) # [video_len, 3, h, w + pad_size + w]
-            else:
-                videos_to_save = videos_diff_motion
+                    pad_size = 16
+                    videos_to_save = torch.cat([
+                        videos_diff_motion,
+                        torch.zeros_like(videos_diff_motion[:, :, :, :pad_size]), # Some padding between the videos
+                        videos_same_motion,
+                    ], dim=3) # [video_len, 3, h, w + pad_size + w]
+                else:
+                    videos_to_save = videos_diff_motion
 
-            videos_to_save = (videos_to_save * 255).to(torch.uint8).permute(0, 2, 3, 1) # [T, H, W, C]
-            torchvision.io.write_video(os.path.join(run_dir, f'{experiment_name}_videos_{cur_nimg//1000:06d}.mp4'), videos_to_save, fps=cfg.dataset.fps, video_codec='h264', options={'crf': '10'})
-            # save_video_frames_as_mp4(videos_to_save, cfg.dataset.fps, os.path.join(run_dir, f'{experiment_name}_videos_{cur_nimg//1000:06d}.mp4'))
-            # if not stats_tfevents is None:
-            #     stats_tfevents.add_video('videos', videos_to_save.unsqueeze(0), global_step=int(cur_nimg / 1e3), walltime=time.time() - start_time)
+                videos_to_save = (videos_to_save * 255).round().to(torch.uint8).permute(0, 2, 3, 1) # [T, H, W, C]
+                filename = os.path.join(run_dir, f'{experiment_name}_videos_{cur_nimg//1000:06d}.mp4')
+                background_process.apply_async(
+                    torchvision.io.write_video,
+                    args=(filename, videos_to_save, G.sampling_dict['fps'], 'h264', {'crf': '10'})
+                )
 
         # Save network snapshot.
         snapshot_pkl = None
@@ -576,18 +562,4 @@ def training_loop(
     if rank == 0:
         print()
         print('Exiting...')
-
-#----------------------------------------------------------------------------
-
-def text_to_markdown(text: str) -> str:
-    """
-    Converts an arbitrarily text into a text that would be well-displayed in TensorBoard.
-    TensorBoard uses markdown to render the text that's why it strips spaces and line breaks.
-    This function fixes that.
-    """
-    text = text.replace(' ', '&nbsp;&nbsp;') # Because markdown does not support text indentation normally...
-    text = text.replace('\n', '  \n') # Because tensorboard uses markdown
-
-    return text
-
-#----------------------------------------------------------------------------
+        background_process.close()

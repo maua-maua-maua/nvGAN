@@ -359,7 +359,13 @@ class AugmentPipe(torch.nn.Module):
         # Execute if the transform is not identity.
         if C is not I_4:
             images = images.reshape([batch_size, num_channels, height * width])
-            if num_channels == 3:
+
+            if num_channels > 3 and num_channels % 3 == 0:
+                num_frames = num_channels // 3
+                images = images.reshape([batch_size * num_frames, 3, height * width])
+                C = C.repeat_interleave(num_frames, dim=0)
+
+            if num_channels % 3 == 0:
                 images = C[:, :3, :3] @ images + C[:, :3, 3:]
             elif num_channels == 1:
                 C = C[:, :3, :].mean(dim=1, keepdims=True)

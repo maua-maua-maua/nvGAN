@@ -54,7 +54,7 @@ def subprocess_fn(rank, args, temp_dir):
     if rank == 0 and args.verbose:
         z = torch.empty([1, G.z_dim], device=device)
         c = torch.empty([1, G.c_dim], device=device)
-        misc.print_module_summary(G, [z, c])
+        misc.print_module_summary(G, dict(z=z, c=c))
 
     # Calculate each metric.
     for metric in args.metrics:

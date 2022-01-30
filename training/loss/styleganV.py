@@ -11,8 +11,9 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
-from src.torch_utils import misc, training_stats
-from src.torch_utils.ops import conv2d_gradfix
+
+from torch_utils import misc, training_stats
+from torch_utils.ops import conv2d_gradfix
 
 #----------------------------------------------------------------------------
 
@@ -22,12 +23,13 @@ class Loss:
 
 #----------------------------------------------------------------------------
 
-class StyleGAN2Loss(Loss):
-    def __init__(self, cfg, device, G_mapping, G_synthesis, D, augment_pipe=None, G_motion_encoder=None,
-                 style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2):
+class StyleGANVLoss(Loss):
+    def __init__(self, device, G_mapping, G_synthesis, D, augment_pipe=None, style_mixing_prob=0,
+                 r1_gamma=0, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, video_consistent_aug=True,
+                 sync_batch_start_time=False, motion_reg=0, motion_reg_num_frames=128, motion_reg_batch_size=256,
+                 predict_dists_weight=0):
         super().__init__()
 
-        self.cfg = cfg
         self.device = device
         self.G_mapping = G_mapping
         self.G_synthesis = G_synthesis
@@ -39,7 +41,12 @@ class StyleGAN2Loss(Loss):
         self.pl_decay = pl_decay
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
-        self.G_motion_encoder = G_motion_encoder
+        self.video_consistent_aug = video_consistent_aug
+        self.sync_batch_start_time = sync_batch_start_time
+        self.motion_reg = motion_reg
+        self.motion_reg_num_frames = motion_reg_num_frames
+        self.motion_reg_batch_size = motion_reg_batch_size
+        self.predict_dists_weight = predict_dists_weight
 
     def run_G(self, z, c, t, l, sync):
         with misc.ddp_sync(self.G_mapping, sync):
@@ -55,15 +62,15 @@ class StyleGAN2Loss(Loss):
 
     def run_D(self, img, c, t, sync):
         if self.augment_pipe is not None:
-            if self.cfg.model.loss_kwargs.get('video_consistent_aug', False):
+            if self.video_consistent_aug:
                 nf, ch, h, w = img.shape
-                f = self.cfg.sampling.num_frames_per_sample
+                f = self.G_synthesis.motion_encoder.num_frames_per_motion
                 n = nf // f
                 img = img.view(n, f * ch, h, w) # [n, f * ch, h, w]
 
             img = self.augment_pipe(img) # [n, f * ch, h, w]
 
-            if self.cfg.model.loss_kwargs.get('video_consistent_aug', False):
+            if self.video_consistent_aug:
                 img = img.view(n * f, ch, h, w) # [n * f, ch, h, w]
 
         with misc.ddp_sync(self.D, sync):
@@ -80,13 +87,13 @@ class StyleGAN2Loss(Loss):
 
         real_img = real_img.view(-1, *real_img.shape[2:]) # [batch_size * num_frames, c, h, w]
 
-        if self.cfg.model.loss_kwargs.get('sync_batch_start_time', False):
+        if self.sync_batch_start_time:
             # Syncing the batch to the same start time
-            if self.cfg.model.loss_kwargs.sync_batch_start_time == 'random':
+            if self.sync_batch_start_time == 'random':
                 offset = gen_t[random.randint(0, len(gen_t) - 1), 0] # [1]
-            elif self.cfg.model.loss_kwargs.sync_batch_start_time == 'zero':
+            elif self.sync_batch_start_time == 'zero':
                 offset = 0 # [1]
-            elif self.cfg.model.loss_kwargs.sync_batch_start_time == 'min':
+            elif self.sync_batch_start_time == 'min':
                 offset = gen_t.min() # [1]
             else:
                 offset = None
@@ -112,23 +119,20 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Gmain_backward'):
                 (loss_Gmain + loss_Gmain_video).mean().mul(gain).backward()
 
-            if self.cfg.model.loss_kwargs.motion_reg.get('coef', 0.0) > 0.0:
-                assert not self.cfg.model.generator.w_conditioning, "Not implemented"
-                motion_reg_cfg = self.cfg.model.loss_kwargs.motion_reg
-
+            if self.motion_reg > 0.0:
                 with torch.autograd.profiler.record_function('Gmotion_reg_forward'):
-                    w = torch.zeros(motion_reg_cfg.batch_size, self.cfg.model.generator.w_dim, device=self.device) # [batch_size, w_dim]
-                    c = torch.zeros(motion_reg_cfg.batch_size, self.cfg.model.generator.c_dim) # [batch_size, c_dim]
-                    l = torch.zeros(motion_reg_cfg.batch_size) # [batch_size]
-                    t = torch.linspace(0, self.cfg.dataset.max_num_frames, motion_reg_cfg.num_frames, device=self.device).unsqueeze(0).repeat_interleave(motion_reg_cfg.batch_size, dim=0) # [batch_size, num_frames]
+                    w = torch.zeros(self.motion_reg_batch_size, self.G_mapping.w_dim, device=self.device) # [batch_size, w_dim]
+                    c = torch.zeros(self.motion_reg_batch_size, self.G_mapping.c_dim) # [batch_size, c_dim]
+                    l = torch.zeros(self.motion_reg_batch_size) # [batch_size]
+                    t = torch.linspace(0, self.G_motion_encoder.max_num_frames, self.motion_reg_num_frames, device=self.device).unsqueeze(0).repeat_interleave(self.motion_reg_batch_size, dim=0) # [batch_size, num_frames]
                     time_emb_coefs = self.G_motion_encoder(c=c, t=t, l=l, w=w, return_time_embs_coefs=True) # {...}
 
-                    periods = time_emb_coefs['periods'].view(motion_reg_cfg.batch_size, motion_reg_cfg.num_frames, -1) # [batch_size, num_frames, num_feats * num_fourier_feats]
-                    phases = time_emb_coefs['phases'].view(motion_reg_cfg.batch_size, motion_reg_cfg.num_frames, -1) # [batch_size, num_frames, num_feats * num_fourier_feats]
+                    periods = time_emb_coefs['periods'].view(self.motion_reg_batch_size, self.motion_reg_num_frames, -1) # [batch_size, num_frames, num_feats * num_fourier_feats]
+                    phases = time_emb_coefs['phases'].view(self.motion_reg_batch_size, self.motion_reg_num_frames, -1) # [batch_size, num_frames, num_feats * num_fourier_feats]
 
                     periods_logvar = -(periods.var(dim=0) + 1e-8).log() # [num_frames, num_feats * num_fourier_feats]
                     phases_logvar = -(phases.var(dim=0) + 1e-8).log() # [num_frames, num_feats * num_fourier_feats]
-                    loss_Gmotion_reg = (periods_logvar.mean() + phases_logvar.mean()) * motion_reg_cfg.coef # [1]
+                    loss_Gmotion_reg = (periods_logvar.mean() + phases_logvar.mean()) * self.motion_reg # [1]
                     dummy = time_emb_coefs['time_embs'].sum() * 0.0 # [1] <- for DDP consistency
 
                     training_stats.report('Loss/G/motion_reg', loss_Gmotion_reg)
@@ -152,7 +156,7 @@ class StyleGAN2Loss(Loss):
                 loss_Gpl = pl_penalty * self.pl_weight
                 training_stats.report('Loss/G/reg', loss_Gpl)
             with torch.autograd.profiler.record_function('Gpl_backward'):
-                (gen_img[:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
+                loss_Gpl.mean().mul(gain).backward()
 
         # Dmain: Minimize logits for generated images.
         loss_Dgen = 0
@@ -165,7 +169,7 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Loss/signs/fake', D_out_gen['image_logits'].sign())
                 loss_Dgen = F.softplus(D_out_gen['image_logits']) # -log(1 - sigmoid(y))
 
-                if self.cfg.model.loss_kwargs.predict_dists_weight > 0.0:
+                if self.predict_dists_weight > 0.0:
                     t_diffs_gen = gen_t[:, 1] - gen_t[:, 0] # [batch_size]
                     loss_Dgen_dist_preds = F.cross_entropy(D_out_gen['dist_preds'], t_diffs_gen.long()) # [batch_size]
                     training_stats.report('Loss/D/dist_preds_gen', loss_Dgen_dist_preds)
@@ -203,9 +207,9 @@ class StyleGAN2Loss(Loss):
                         training_stats.report('Loss/scores/real_video', D_out_real['video_logits'])
                         training_stats.report('Loss/D/loss_video', loss_Dgen_video + loss_Dreal_video)
 
-                    if self.cfg.model.loss_kwargs.predict_dists_weight > 0.0:
+                    if self.predict_dists_weight > 0.0:
                         t_diffs_real = real_t[:, 1] - real_t[:, 0] # [batch_size]
-                        loss_Dreal_dist_preds = F.cross_entropy(dist_preds_real, t_diffs_real.long()) # [batch_size]
+                        loss_Dreal_dist_preds = F.cross_entropy(D_out_real['dist_preds'], t_diffs_real.long()) # [batch_size]
                         training_stats.report('Loss/D/dist_preds_real', loss_Dreal_dist_preds)
 
                 loss_Dr1 = 0

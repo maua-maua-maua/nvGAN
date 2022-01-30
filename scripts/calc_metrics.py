@@ -56,7 +56,7 @@ def subprocess_fn(rank, args, temp_dir):
         c = torch.empty([8, G.c_dim], device=device)
         t = torch.zeros([8, G.cfg.sampling.num_frames_per_sample], device=device).long()
         l = torch.zeros([8], device=device).float()
-        misc.print_module_summary(G, [z, c, t[:, 0], l])
+        misc.print_module_summary(G, dict(z=z, c=c, t=t[:, 0], l=l))
 
     # Calculate each metric.
     for metric in args.metrics:

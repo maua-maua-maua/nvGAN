@@ -23,12 +23,12 @@ import dnnlib
 import legacy
 from metrics import metric_main
 from torch_utils import custom_ops, misc, training_stats
-from training import training_loop
+from training import training_loop, training_loop_video
 
 #----------------------------------------------------------------------------
 
 
-def subprocess_fn(rank, c, temp_dir):
+def subprocess_fn(rank, c, temp_dir, video_training):
     dnnlib.util.Logger(file_name=os.path.join(c.run_dir, 'log.txt'), file_mode='a', should_flush=True)
 
     # Init torch.distributed.
@@ -48,10 +48,10 @@ def subprocess_fn(rank, c, temp_dir):
         custom_ops.verbosity = 'none'
 
     # Execute training loop.
-    training_loop.training_loop(rank=rank, **c)
+    (training_loop_video if video_training else training_loop).training_loop(rank=rank, **c)
 
 
-def launch_training(c, desc, outdir, dry_run):
+def launch_training(c, desc, outdir, dry_run, video_training):
     dnnlib.util.Logger(should_flush=True)
 
     # Pick output directory.
@@ -102,21 +102,21 @@ def launch_training(c, desc, outdir, dry_run):
     torch.multiprocessing.set_start_method('spawn')
     with tempfile.TemporaryDirectory() as temp_dir:
         if c.num_gpus == 1:
-            subprocess_fn(rank=0, c=c, temp_dir=temp_dir)
+            subprocess_fn(rank=0, c=c, temp_dir=temp_dir, video_training=video_training)
         else:
-            torch.multiprocessing.spawn(fn=subprocess_fn, args=(c, temp_dir), nprocs=c.num_gpus)
+            torch.multiprocessing.spawn(fn=subprocess_fn, args=(c, temp_dir), nprocs=c.num_gpus, video_training=video_training)
 
 
 def init_dataset_kwargs(data, video=False):
     try:
         if video:
-            dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.video.VideoFramesFolderDataset', path=data, use_labels=True, max_size=None, xflip=False)
+            dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.video.VideoFramesFolderDataset', path=data, use_labels=True, max_size=None, xflip=False, yflip=False)
             dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs) # Subclass of training.dataset.Dataset.
             dataset_kwargs.resolution = dataset_obj.resolution # Be explicit about resolution.
             dataset_kwargs.use_labels = dataset_obj.has_labels # Be explicit about labels.
             dataset_kwargs.max_size = len(dataset_obj) # Be explicit about dataset size.
         else:
-            dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.image.ImageFolderDataset', path=data, use_labels=True, max_size=None, xflip=False)
+            dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.image.ImageFolderDataset', path=data, use_labels=True, max_size=None, xflip=False, yflip=False)
             dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs) # Subclass of training.dataset.Dataset.
             dataset_kwargs.resolution = dataset_obj.resolution # Be explicit about resolution.
             dataset_kwargs.use_labels = dataset_obj.has_labels # Be explicit about labels.
@@ -243,7 +243,21 @@ def main(**kwargs):
     c.G_kwargs.z_dim = opts.z_dim if opts.z_dim else (64 if opts.projected else 512)
     c.G_kwargs.w_dim = opts.w_dim if opts.w_dim else (128 if opts.projected else 512)
 
-    if opts.projected:
+    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.stylegan2.StyleGAN2Loss')
+
+    if opts.video:
+        c.G_kwargs.class_name = 'networks.styleganV.generator.Generator'
+        c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.styleganV.StyleGANVLoss')
+        opts.cfg = 'styleganV'
+        opts.cbase = 16384
+        opts.gamma = 0.2
+        opts.pl_weight = 0
+
+        c.D_kwargs = dnnlib.EasyDict(class_name='networks.styleganV.discriminator.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
+        c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
+        c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
+
+    elif opts.projected:
         c.D_kwargs = dnnlib.EasyDict(
             class_name='networks.projected.discriminator.ProjectedDiscriminator',
             diffaug=True,
@@ -255,12 +269,11 @@ def main(**kwargs):
         c.D_kwargs.backbone_kwargs.proj_type = 2
         c.D_kwargs.backbone_kwargs.num_discs = 4
         c.D_kwargs.backbone_kwargs.cond = opts.cond
+
     else:
         c.D_kwargs = dnnlib.EasyDict(class_name='networks.stylegan2.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
         c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
         c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
-
-    c.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.stylegan2.StyleGAN2Loss')
 
     c.G_kwargs.channel_base = c.D_kwargs.channel_base = opts.cbase
     c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
@@ -268,17 +281,22 @@ def main(**kwargs):
 
     c.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
     c.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', betas=[0,0.99], eps=1e-8)
+    c.G_opt_kwargs.lr = c.D_opt_kwargs.lr = 0.0025
 
     if opts.cfg == 'stylegan2':
         c.G_kwargs.class_name = 'networks.stylegan2.Generator'
+        if opts.projected:
+            c.D_kwargs.backbone_kwargs.separable = True
         c.G_opt_kwargs.lr = c.D_opt_kwargs.lr = 0.002
-        c.D_kwargs.backbone_kwargs.separable = True
+
     elif opts.cfg in ['fastgan', 'fastgan_lite']:
         c.G_kwargs = dnnlib.EasyDict(class_name='networks.fastgan.Generator', cond=opts.cond, synthesis_kwargs=dnnlib.EasyDict())
         c.G_kwargs.synthesis_kwargs.lite = (opts.cfg == 'fastgan_lite')
         c.G_opt_kwargs.lr = c.D_opt_kwargs.lr = 0.0002
-        c.D_kwargs.backbone_kwargs.separable = False
-    else:
+        if opts.projected:
+            c.D_kwargs.backbone_kwargs.separable = False
+
+    elif opts.cfg in ['stylegan3-t', 'stylegan3-r']:
         c.G_kwargs.class_name = 'networks.stylegan3.Generator'
         c.G_kwargs.magnitude_ema_beta = 0.5 ** (c.batch_size / (20 * 1e3))
         if opts.cfg == 'stylegan3-r':
@@ -288,8 +306,8 @@ def main(**kwargs):
             c.G_kwargs.use_radial_filters = True # Use radially symmetric downsampling filters.
             c.loss_kwargs.blur_init_sigma = 10 # Blur the images seen by the discriminator.
             c.loss_kwargs.blur_fade_kimg = c.batch_size * 200 / 32 # Fade out the blur during the first N kimg.
-        c.G_opt_kwargs.lr = c.D_opt_kwargs.lr = 0.0025
-        c.D_kwargs.backbone_kwargs.separable = True  # TODO does stylegan3 want separable or not?
+        if opts.projected:
+            c.D_kwargs.backbone_kwargs.separable = True  # TODO does stylegan3 want separable or not?
 
     if opts.glr is not None:
         c.G_opt_kwargs.lr = opts.glr # Override the default learning rate if specified
@@ -390,7 +408,7 @@ def main(**kwargs):
     desc += f'-gpus{c.num_gpus:d}-batch{c.batch_size:d}'
 
     # Launch.
-    launch_training(c=c, desc=desc, outdir=opts.outdir, dry_run=opts.dry_run)
+    launch_training(c=c, desc=desc, outdir=opts.outdir, dry_run=opts.dry_run, video_training=opts.video)
 
     # Check for restart
     last_snapshot = misc.get_ckpt_path(c.run_dir)

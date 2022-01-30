@@ -199,7 +199,7 @@ def check_ddp_consistency(module, ignore_regex=None):
 def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True):
     assert isinstance(module, torch.nn.Module)
     assert not isinstance(module, torch.jit.ScriptModule)
-    assert isinstance(inputs, (tuple, list))
+    assert isinstance(inputs, (dict))
 
     # Register hooks.
     entries = []
@@ -216,7 +216,7 @@ def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True):
     hooks += [mod.register_forward_hook(post_hook) for mod in module.modules()]
 
     # Run module.
-    outputs = module(*inputs)
+    outputs = module(**inputs)
     for hook in hooks:
         hook.remove()
 
