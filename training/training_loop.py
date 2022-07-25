@@ -16,16 +16,17 @@
 import copy
 import json
 import os
-import time
+from time import time
 
 import dill
+import dnnlib
+import legacy
 import numpy as np
 import PIL.Image
 import psutil
 import torch
+from torchvision.utils import make_grid
 
-import dnnlib
-import legacy
 from metrics import metric_main
 from torch_utils import misc, training_stats
 from torch_utils.ops import conv2d_gradfix, grid_sample_gradfix
@@ -36,6 +37,8 @@ def setup_snapshot_image_grid(training_set, random_seed=0):
     rnd = np.random.RandomState(random_seed)
     gw = np.clip(7680 // training_set.image_shape[2], 7, 32)
     gh = np.clip(4320 // training_set.image_shape[1], 4, 32)
+    if training_set.image_shape[1] == 1024:
+        gw, gh = gw * 2, gh * 2
 
     # No labels => show random subset of training samples.
     if not training_set.has_labels:
@@ -67,27 +70,30 @@ def setup_snapshot_image_grid(training_set, random_seed=0):
 
     # Load data.
     images, labels = zip(*[training_set[i] for i in grid_indices])
-    return (gw, gh), np.stack(images), np.stack(labels)
+    return (gw, gh), torch.stack([torch.from_numpy(i).float() for i in images]), np.stack(labels)
 
 #----------------------------------------------------------------------------
 
 def save_image_grid(img, fname, drange, grid_size):
     lo, hi = drange
-    img = np.asarray(img, dtype=np.float32)
     img = (img - lo) * (255 / (hi - lo))
-    img = np.rint(img).clip(0, 255).astype(np.uint8)
+
+    if img.shape[-1] == 1024:
+        from resize_right import resize
+        img = resize(img, out_shape=(512, 512))
+
+    img = img.round().clamp(0,255).byte()
 
     gw, gh = grid_size
-    _N, C, H, W = img.shape
-    img = img.reshape([gh, gw, C, H, W])
-    img = img.transpose(0, 3, 1, 4, 2)
-    img = img.reshape([gh * H, gw * W, C])
+    img = make_grid(img, nrow=gw, padding=0)
+    img = img.permute(1, 2, 0)
 
-    assert C in [1, 3]
-    if C == 1:
-        PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
-    if C == 3:
-        PIL.Image.fromarray(img, 'RGB').save(fname)
+    assert img.shape[2] in [1, 3]
+    if img.shape[2] == 1:
+        PIL.Image.fromarray(img[:, :, 0].numpy(), 'L').save(fname)
+    if img.shape[2] == 3:
+        PIL.Image.fromarray(img.numpy(), 'RGB').save(fname)
+
 
 #----------------------------------------------------------------------------
 
@@ -129,7 +135,7 @@ def training_loop(
 ):
     
     # Initialize.
-    start_time = time.time()
+    start_time = time()
     device = torch.device('cuda', rank)
     np.random.seed(random_seed * num_gpus + rank)
     torch.manual_seed(random_seed * num_gpus + rank)
@@ -249,7 +255,7 @@ def training_loop(
         save_image_grid(images, os.path.join(run_dir, 'reals.jpg'), drange=[0,255], grid_size=grid_size)
         grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
         grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-        images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+        images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)])
         save_image_grid(images, os.path.join(run_dir, 'fakes_init.jpg'), drange=[-1,1], grid_size=grid_size)
 
     # Initialize logs.
@@ -280,7 +286,7 @@ def training_loop(
     cur_nimg = __CUR_NIMG__.item()
     cur_tick = __CUR_TICK__.item()
     tick_start_nimg = cur_nimg
-    tick_start_time = time.time()
+    tick_start_time = time()
     maintenance_time = tick_start_time - start_time
     batch_idx = __BATCH_IDX__.item()
     if progress_fn is not None:
@@ -364,7 +370,7 @@ def training_loop(
             continue
 
         # Print status line, accumulating the same information in training_stats.
-        tick_end_time = time.time()
+        tick_end_time = time()
         fields = []
         fields += [f"tick {training_stats.report0('Progress/tick', cur_tick):<5d}"]
         fields += [f"kimg {training_stats.report0('Progress/kimg', cur_nimg / 1e3):<8.1f}"]
@@ -390,7 +396,7 @@ def training_loop(
                 print('Aborting...')
 
         # Check for restart.
-        if (rank == 0) and (restart_every > 0) and (time.time() - start_time > restart_every):
+        if (rank == 0) and (restart_every > 0) and (time() - start_time > restart_every):
             print('Restart job...')
             __RESTART__ = torch.tensor(1., device=device)
         if num_gpus > 1:
@@ -403,7 +409,7 @@ def training_loop(
 
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)])
             save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.jpg'), drange=[-1,1], grid_size=grid_size)
 
         # Save network snapshot.
@@ -466,7 +472,7 @@ def training_loop(
         stats_dict = stats_collector.as_dict()
 
         # Update logs.
-        timestamp = time.time()
+        timestamp = time()
         if stats_jsonl is not None:
             fields = dict(stats_dict, timestamp=timestamp)
             stats_jsonl.write(json.dumps(fields) + '\n')
@@ -485,7 +491,7 @@ def training_loop(
         # Update state.
         cur_tick += 1
         tick_start_nimg = cur_nimg
-        tick_start_time = time.time()
+        tick_start_time = time()
         maintenance_time = tick_start_time - tick_end_time
         if done:
             break

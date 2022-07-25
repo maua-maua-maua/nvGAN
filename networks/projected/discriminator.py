@@ -50,8 +50,8 @@ class SingleDisc(nn.Module):
         layers.append(conv2d(nfc[end_sz], 1, 4, 1, 0, bias=False))
         self.main = nn.Sequential(*layers)
 
-    def forward(self, x, c):
-        return self.main(x)
+    def forward(self, img, c):
+        return self.main(img)
 
 
 class SingleDiscCond(nn.Module):
@@ -102,8 +102,8 @@ class SingleDiscCond(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-    def forward(self, x, c):
-        h = self.main(x)
+    def forward(self, img, c):
+        h = self.main(img)
         out = self.cls(h)
 
         # conditioning via projection
@@ -175,16 +175,16 @@ class ProjectedDiscriminator(torch.nn.Module):
     def eval(self):
         return self.train(False)
 
-    def forward(self, x, c, update_emas=False):
+    def forward(self, img, c, update_emas=False):
         _ = update_emas # unused
-        
+
         if self.diffaug:
-            x = DiffAugment(x, policy='color,translation,cutout')
+            img = DiffAugment(img, policy='color,translation,cutout')
 
         if self.interp224:
-            x = F.interpolate(x, 224, mode='bilinear', align_corners=False)
+            img = F.interpolate(img, 224, mode='bilinear', align_corners=False)
 
-        features = self.feature_network(x)
+        features = self.feature_network(img)
         logits = self.discriminator(features, c)
 
         return logits

@@ -10,8 +10,8 @@
 arbitrarily high order gradients with zero performance penalty."""
 
 import contextlib
-
 import torch
+from pkg_resources import parse_version
 
 # pylint: disable=redefined-builtin
 # pylint: disable=arguments-differ
@@ -21,6 +21,7 @@ import torch
 
 enabled = False                     # Enable the custom op by setting this to true.
 weight_gradients_disabled = False   # Forcefully disable computation of gradients with respect to the weights.
+_use_pytorch_1_11_api = parse_version(torch.__version__) >= parse_version('1.11.0a') # Allow prerelease builds of 1.11
 
 @contextlib.contextmanager
 def no_weight_gradients(disable=True):
@@ -48,6 +49,9 @@ def conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_paddi
 def _should_use_custom_op(input):
     assert isinstance(input, torch.Tensor)
     if (not enabled) or (not torch.backends.cudnn.enabled):
+        return False
+    if _use_pytorch_1_11_api:
+        # The work-around code doesn't work on PyTorch 1.11.0 onwards
         return False
     if input.device.type != 'cuda':
         return False
@@ -171,7 +175,7 @@ def _conv2d_gradfix(transpose, weight_shape, stride, padding, output_padding, di
             # General case => cuDNN.
             name = 'aten::cudnn_convolution_transpose_backward_weight' if transpose else 'aten::cudnn_convolution_backward_weight'
             flags = [torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic, torch.backends.cudnn.allow_tf32]
-            return torch._C._jit_get_operation(name)(weight_shape, grad_output, input, padding, stride, dilation, groups, *flags)
+            return torch._C._jit_get_operation(name)[0](weight_shape, grad_output, input, padding, stride, dilation, groups, *flags)
 
         @staticmethod
         def backward(ctx, grad2_grad_weight):

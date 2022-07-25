@@ -9,11 +9,11 @@
 """Custom PyTorch ops for efficient resampling of 2D images."""
 
 import os
-
 import numpy as np
 import torch
 
-from .. import custom_ops, misc
+from .. import custom_ops
+from .. import misc
 from . import conv2d_gradfix
 
 #----------------------------------------------------------------------------
@@ -28,7 +28,7 @@ def _init():
             sources=['upfirdn2d.cpp', 'upfirdn2d.cu'],
             headers=['upfirdn2d.h'],
             source_dir=os.path.dirname(__file__),
-            extra_cuda_cflags=['--use_fast_math'],
+            extra_cuda_cflags=['--use_fast_math', '--allow-unsupported-compiler'],
         )
     return True
 
